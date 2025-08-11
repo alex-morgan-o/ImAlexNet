@@ -1,145 +1,421 @@
 <template>
-  <div class="border-t border-dark-300 bg-dark-400 p-4">
-    <div class="max-w-4xl mx-auto">
-      <div class="relative">
-        <textarea
-          ref="textareaRef"
-          v-model="message"
-          @keydown="handleKeydown"
-          @input="adjustHeight"
-          placeholder="Ask AlexNet anything..."
-          class="input-field w-full resize-none overflow-hidden min-h-[44px] max-h-32 pr-12"
-          rows="1"
-        />
-        <button
-          @click="sendMessage"
-          :disabled="!message.trim() || isLoading"
-          class="absolute right-2 top-1/2 transform -translate-y-1/2 p-2 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-          :class="message.trim() && !isLoading ? 'text-primary-accent hover:bg-dark-200' : 'text-gray-400'"
-        >
-          <svg v-if="!isLoading" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="w-5 h-5">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-          </svg>
-          <svg v-else class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-        </button>
-      </div>
-      
-      <!-- Quick actions -->
-      <div v-if="!message" class="flex flex-wrap gap-2 mt-3">
-        <button
-          v-for="suggestion in quickSuggestions"
-          :key="suggestion"
-          @click="message = suggestion"
-          class="px-3 py-1 text-sm bg-dark-300 text-primary-fg rounded-full hover:bg-dark-200 transition-colors duration-200"
-        >
-          {{ suggestion }}
-        </button>
-      </div>
-      
-      <!-- File upload area -->
-      <div v-if="message" class="mt-3 flex items-center space-x-2">
-        <button
-          @click="fileInput?.click()"
-          class="flex items-center space-x-1 px-3 py-1 text-sm bg-dark-300 text-primary-fg rounded-lg hover:bg-dark-200 transition-colors duration-200"
-        >
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" class="w-4 h-4">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-          </svg>
-          <span>Attach files</span>
-        </button>
-        <input
-          ref="fileInput"
-          type="file"
-          multiple
-          class="hidden"
-          @change="handleFileUpload"
-        />
-      </div>
-      
-      <!-- Uploaded files preview -->
-      <div v-if="uploadedFiles.length" class="mt-2 flex flex-wrap gap-2">
-        <div
-          v-for="(file, index) in uploadedFiles"
-          :key="index"
-          class="flex items-center space-x-2 px-2 py-1 bg-dark-300 rounded-lg text-sm"
-        >
-          <span class="text-primary-fg">{{ file.name }}</span>
-          <button
-            @click="removeFile(index)"
-            class="text-gray-400 hover:text-primary-error"
-          >
-            ×
-          </button>
+    <div id="halo-search" :class="props.class">
+        <div class="aurora-glow"></div>
+        <div class="outer-ring"></div>
+        <div class="outer-ring"></div>
+        <div class="outer-ring"></div>
+
+        <div class="inner-glow"></div>
+
+        <div class="main-border"></div>
+
+        <div id="search-wrapper">
+            <input
+                v-bind="$attrs"
+                v-model="modelValue"
+                :placeholder="currentPlaceholder"
+                type="text"
+                name="text"
+                class="search-field"
+            />
+            <div class="search-btn-border"></div>
+            <span
+                :class="[
+                    'absolute top-2 right-2 flex items-center justify-center z-[2] max-h-10 max-w-10 size-full isolate overflow-hidden rounded-lg border border-transparent border-solid',
+                ]"
+                style=""
+            >
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="text-white"
+                >
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="m21 21-4.35-4.35" />
+                </svg>
+            </span>
         </div>
-      </div>
     </div>
-  </div>
 </template>
 
-<script setup lang="ts">
-import { ref, nextTick } from 'vue'
+<script lang="ts" setup>
+import type { HTMLAttributes } from "vue";
+import { useVModel } from "@vueuse/core";
+import { ref, onMounted, onUnmounted } from "vue";
 
-const message = ref('')
-const textareaRef = ref<HTMLTextAreaElement>()
-const fileInput = ref<HTMLInputElement>()
-const uploadedFiles = ref<File[]>([])
-const isLoading = ref(false)
+defineOptions({
+    inheritAttrs: false,
+});
 
-const quickSuggestions = [
-  'Help me debug this code',
-  'Explain this concept',
-  'Write a function for...',
-  'Review my architecture',
-  'Generate documentation'
-]
-
-const emit = defineEmits(['send-message'])
-
-async function adjustHeight() {
-  await nextTick()
-  if (textareaRef.value) {
-    textareaRef.value.style.height = 'auto'
-    textareaRef.value.style.height = `${textareaRef.value.scrollHeight}px`
-  }
+interface Props {
+    defaultValue?: string | number;
+    modelValue?: string | number;
+    class?: HTMLAttributes["class"];
 }
 
-function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault()
-    sendMessage()
-  }
+const props = defineProps<Props>();
+
+const emits = defineEmits<{
+    (e: "update:modelValue", payload: string | number): void;
+}>();
+
+const modelValue = useVModel(props, "modelValue", emits, {
+    passive: true,
+    defaultValue: props.defaultValue,
+});
+
+// Placeholder rotation functionality
+const currentPlaceholder = ref("");
+const placeholderIndex = ref(0);
+let placeholderInterval: number | null = null;
+
+const placeholders = [
+    "ask me anything...",
+    "awaiting orders...",
+    "your wish is my command...",
+    "make your wish...",
+    "how can I help?...",
+    "what shall we build?...",
+    "ready for action...",
+    "at your service...",
+    "what's on your mind?...",
+    "let's create something...",
+    "what do you need?...",
+    "I'm all ears...",
+    "fire away...",
+    "what's the mission?...",
+];
+
+function rotatePlaceholder() {
+    placeholderIndex.value = (placeholderIndex.value + 1) % placeholders.length;
+    currentPlaceholder.value = placeholders[placeholderIndex.value];
 }
 
-function sendMessage() {
-  if (!message.value.trim() || isLoading.value) return
-  
-  emit('send-message', {
-    text: message.value.trim(),
-    files: [...uploadedFiles.value]
-  })
-  
-  message.value = ''
-  uploadedFiles.value = []
-  adjustHeight()
-}
+onMounted(() => {
+    // Set initial placeholder
+    currentPlaceholder.value = placeholders[0];
 
-function handleFileUpload(event: Event) {
-  const files = (event.target as HTMLInputElement).files
-  if (files) {
-    uploadedFiles.value.push(...Array.from(files))
-  }
-}
+    // Start rotation every 2.5 seconds
+    placeholderInterval = setInterval(rotatePlaceholder, 2500);
+});
 
-function removeFile(index: number) {
-  uploadedFiles.value.splice(index, 1)
-}
-
-defineExpose({
-  setLoading: (loading: boolean) => {
-    isLoading.value = loading
-  }
-})
+onUnmounted(() => {
+    if (placeholderInterval) {
+        clearInterval(placeholderInterval);
+    }
+});
 </script>
+
+<style scoped>
+#halo-search {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+}
+
+#search-wrapper {
+    position: relative;
+    width: 100%;
+}
+
+.grid {
+    height: 800px;
+    width: 800px;
+    background-image:
+        linear-gradient(to right, #0f0f10 1px, transparent 1px),
+        linear-gradient(to bottom, #0f0f10 1px, transparent 1px);
+    background-size: 1rem 1rem;
+    background-position: center center;
+    position: absolute;
+    z-index: -1;
+    filter: blur(1px);
+}
+
+.search-field {
+    background-color: #010201;
+    border: none;
+    width: 100%;
+    height: 56px;
+    border-radius: 10px;
+    color: white;
+    padding-right: 60px;
+    padding-left: 16px;
+    font-size: 18px;
+}
+
+.search-field::placeholder {
+    color: #c0b9c0;
+}
+
+.search-field:focus {
+    outline: none;
+}
+
+.inner-glow,
+.main-border,
+.outer-ring,
+.aurora-glow {
+    max-height: 70px;
+    height: 100%;
+    width: 100%;
+    position: absolute;
+    overflow: hidden;
+    z-index: -1;
+    border-radius: 12px;
+    filter: blur(3px);
+}
+
+.inner-glow {
+    max-height: 63px;
+    border-radius: 10px;
+    filter: blur(2px);
+}
+
+.inner-glow::before {
+    content: "";
+    z-index: -2;
+    text-align: center;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(83deg);
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    filter: brightness(1.4);
+    background-image: conic-gradient(
+        rgba(0, 0, 0, 0) 0%,
+        #a099d8,
+        rgba(0, 0, 0, 0) 8%,
+        rgba(0, 0, 0, 0) 50%,
+        #dfa2da,
+        rgba(0, 0, 0, 0) 58%
+    );
+    transition: all 2s;
+}
+
+.main-border {
+    max-height: 59px;
+    border-radius: 11px;
+    filter: blur(0.5px);
+}
+
+.main-border::before {
+    content: "";
+    z-index: -2;
+    text-align: center;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(70deg);
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    filter: brightness(1.3);
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    background-image: conic-gradient(
+        #1c191c,
+        #402fb5 5%,
+        #1c191c 14%,
+        #1c191c 50%,
+        #cf30aa 60%,
+        #1c191c 64%
+    );
+    transition: all 2s;
+}
+
+.outer-ring {
+    max-height: 65px;
+}
+
+.outer-ring::before {
+    content: "";
+    z-index: -2;
+    text-align: center;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(82deg);
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    background-image: conic-gradient(
+        rgba(0, 0, 0, 0),
+        #18116a,
+        rgba(0, 0, 0, 0) 10%,
+        rgba(0, 0, 0, 0) 50%,
+        #6e1b60,
+        rgba(0, 0, 0, 0) 60%
+    );
+    transition: all 2s;
+}
+
+.aurora-glow {
+    overflow: hidden;
+    filter: blur(30px);
+    opacity: 0.4;
+    max-height: 130px;
+}
+
+.aurora-glow:before {
+    content: "";
+    z-index: -2;
+    text-align: center;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(60deg);
+    position: absolute;
+    width: 999px;
+    height: 999px;
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    background-image: conic-gradient(
+        #000,
+        #402fb5 5%,
+        #000 38%,
+        #000 50%,
+        #cf30aa 60%,
+        #000 87%
+    );
+    transition: all 2s;
+}
+
+/* ===========================================
+   INPUT OVERLAY & ACCENT EFFECTS
+   =========================================== */
+
+#text-mask {
+    pointer-events: none;
+    width: 100px;
+    height: 20px;
+    position: absolute;
+    background: linear-gradient(90deg, transparent, black);
+    top: 18px;
+    left: 32px;
+}
+
+#accent-blur {
+    pointer-events: none;
+    width: 30px;
+    height: 20px;
+    position: absolute;
+    background: #cf30aa;
+    top: 10px;
+    left: 5px;
+    filter: blur(20px);
+    opacity: 0.8;
+    transition: all 2s;
+}
+
+.search-btn-border {
+    height: 42px;
+    width: 42px;
+    position: absolute;
+    overflow: hidden;
+    top: 7px;
+    right: 7px;
+    border-radius: 12px;
+}
+
+.search-btn-border::before {
+    content: "";
+    text-align: center;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(90deg);
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    filter: brightness(1.35);
+    background-image: conic-gradient(
+        rgba(0, 0, 0, 0),
+        #3d3a4f,
+        rgba(0, 0, 0, 0) 50%,
+        rgba(0, 0, 0, 0) 50%,
+        #3d3a4f,
+        rgba(0, 0, 0, 0) 100%
+    );
+    animation: rotate 4s linear infinite;
+}
+
+#halo-search:hover > .outer-ring::before {
+    transform: translate(-50%, -50%) rotate(-98deg);
+}
+
+#halo-search:hover > .aurora-glow::before {
+    transform: translate(-50%, -50%) rotate(-120deg);
+}
+
+#halo-search:hover > .inner-glow::before {
+    transform: translate(-50%, -50%) rotate(-97deg);
+}
+
+#halo-search:hover > .main-border::before {
+    transform: translate(-50%, -50%) rotate(-110deg);
+}
+
+#search-wrapper:hover > #accent-blur {
+    opacity: 0;
+}
+
+#halo-search:focus-within > .outer-ring::before {
+    transform: translate(-50%, -50%) rotate(442deg);
+    transition: all 4s;
+}
+
+#halo-search:focus-within > .aurora-glow::before {
+    transform: translate(-50%, -50%) rotate(420deg);
+    transition: all 4s;
+}
+
+#halo-search:focus-within > .inner-glow::before {
+    transform: translate(-50%, -50%) rotate(443deg);
+    transition: all 4s;
+}
+
+#halo-search:focus-within > .main-border::before {
+    transform: translate(-50%, -50%) rotate(430deg);
+    transition: all 4s;
+}
+
+#search-wrapper:focus-within > #text-mask {
+    display: none;
+}
+
+@keyframes rotate {
+    100% {
+        transform: translate(-50%, -50%) rotate(450deg);
+    }
+}
+
+@keyframes leftright {
+    0% {
+        transform: translate(0px, 0px);
+        opacity: 1;
+    }
+    49% {
+        transform: translate(250px, 0px);
+        opacity: 0;
+    }
+    80% {
+        transform: translate(-40px, 0px);
+        opacity: 0;
+    }
+    100% {
+        transform: translate(0px, 0px);
+        opacity: 1;
+    }
+}
+</style>
