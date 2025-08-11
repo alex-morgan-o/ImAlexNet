@@ -3,6 +3,9 @@
         class="flex-1 flex flex-col items-center justify-center bg-primary-bg px-6"
     >
         <div class="w-full max-w-2xl">
+            <BlackHoleBackground
+                class="absolute inset-0 flex items-center justify-center rounded-xl"
+            />
             <!-- Greeting -->
             <div class="text-center mb-8">
                 <h1 class="text-2xl text-primary-fg mb-4">
@@ -129,5 +132,4 @@ onUnmounted(() => {
 .placeholder-transition:focus::placeholder {
     opacity: 0.6;
 }
-
 </style>

@@ -165,7 +165,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="h-screen bg-primary-bg text-primary-fg flex flex-col">
+  <div class="h-screen bg-background text-foreground flex flex-col">
     <!-- Toolbar -->
     <Toolbar
       @new-session="handleNewSession"
