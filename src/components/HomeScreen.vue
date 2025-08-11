@@ -1,27 +1,26 @@
 <template>
-    <div
-        class="flex-1 flex flex-col items-center justify-center bg-primary-bg px-6"
-    >
-        <div class="w-full max-w-2xl">
-            <BlackHoleBackground
-                class="absolute inset-0 flex items-center justify-center rounded-xl"
-            />
+    <div class="relative flex-1 flex items-center justify-center">
+        <!-- Full-page BlackHole Background -->
+        <BlackHoleBackground class="absolute inset-0" />
+
+        <!-- Content overlay -->
+        <div class="absolute z-10 w-full max-w-4xl flex flex-col items-center">
             <!-- Greeting -->
             <div class="text-center mb-8">
-                <h1 class="text-2xl text-primary-fg mb-4">
+                <h1 class="text-2xl text-primary-fg mb-4 font-extrabold">
                     I'm AlexNet<br />I can do anything
                 </h1>
             </div>
 
             <!-- Chat Input -->
-            <div class="relative">
+            <div class="relative w-full max-w-4xl">
                 <textarea
                     ref="textareaRef"
                     v-model="message"
                     @keydown="handleKeydown"
                     @input="adjustHeight"
                     :placeholder="currentPlaceholder"
-                    class="input-field w-full resize-none overflow-hidden min-h-[60px] max-h-32 pr-12 text-base placeholder-transition"
+                    class="input-field w-full max-w-4xl resize-none overflow-hidden min-h-[60px] max-h-32 pr-12 text-base placeholder-transition"
                     rows="1"
                 />
                 <button
@@ -55,6 +54,7 @@
 
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted } from "vue";
+import BlackHoleBackground from "./BlackHoleBackground.vue";
 
 const message = ref("");
 const textareaRef = ref<HTMLTextAreaElement>();
