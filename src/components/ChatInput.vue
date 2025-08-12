@@ -10,14 +10,16 @@
         <div class="main-border"></div>
 
         <div id="search-wrapper">
-            <input
-                v-bind="$attrs"
-                v-model="modelValue"
-                :placeholder="currentPlaceholder"
-                type="text"
-                name="text"
-                class="search-field"
-            />
+            <form @submit.prevent="handleSubmit">
+                <input
+                    v-bind="$attrs"
+                    v-model="modelValue"
+                    :placeholder="currentPlaceholder"
+                    type="text"
+                    name="text"
+                    class="search-field"
+                />
+            </form>
             <div class="search-btn-border"></div>
             <span
                 :class="[
@@ -64,6 +66,7 @@ const props = defineProps<Props>();
 
 const emits = defineEmits<{
     (e: "update:modelValue", payload: string | number): void;
+    (e: "send-message", payload: { text: string; files: File[] }): void;
 }>();
 
 const modelValue = useVModel(props, "modelValue", emits, {
@@ -96,6 +99,14 @@ const placeholders = [
 function rotatePlaceholder() {
     placeholderIndex.value = (placeholderIndex.value + 1) % placeholders.length;
     currentPlaceholder.value = placeholders[placeholderIndex.value];
+}
+
+function handleSubmit() {
+    const text = String(modelValue.value || '').trim();
+    if (text) {
+        emits('send-message', { text, files: [] });
+        modelValue.value = '';
+    }
 }
 
 onMounted(() => {
