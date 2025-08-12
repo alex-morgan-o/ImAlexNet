@@ -1,44 +1,20 @@
 <template>
-    <div
-        class=""
-        :class="
-            message.role === 'user' ? 'flex justify-end' : 'flex justify-start'
-        "
-    >
+    <div class="">
         <div class="flex flex-col max-w-4xl">
             <!-- Avatar -->
             <div class="">
-                <div
-                    class="flex items-center text-white text-sm font-medium"
-                    :class="
-                        message.role === 'user'
-                            ? 'bg-primary-accent'
-                            : 'bg-primary-success'
-                    "
-                >
-                    {{ message.role === "user" ? "" : "AlexNet" }}
+                <div class="flex items-center text-white text-sm font-medium">
+                    {{ message.role === "user" ? "You" : "AlexNet" }}
                 </div>
             </div>
 
             <!-- Message content -->
             <div class="min-w-0">
-                <div
-                    class=""
-                    :class="
-                        message.role === 'user'
-                            ? 'chat-bubble-user'
-                            : 'chat-bubble-ai'
-                    "
-                >
+                <div class="">
                     <!-- Text content -->
                     <div
                         v-if="message.content"
                         class="prose prose-sm max-w-none"
-                        :class="
-                            message.role === 'user'
-                                ? 'prose-invert'
-                                : 'prose-gray'
-                        "
                     >
                         <div v-html="formatMessage(message.content)"></div>
                     </div>
