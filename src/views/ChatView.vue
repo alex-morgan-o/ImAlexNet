@@ -39,12 +39,13 @@
             </div>
 
             <!-- Simple Chat Input - Fixed at bottom -->
-            <div class="border-t border-gray-700 p-4">
-                <div class="flex items-center space-x-2 p-4 bg-dark-300 rounded-lg">
+            <div class="p-4">
+                <div class="flex items-center space-x-2 p-4 rounded-lg">
                     <input
+                        ref="inputRef"
                         v-model="inputText"
                         type="text"
-                        placeholder="Type your message..."
+                        placeholder=">"
                         class="flex-1 bg-transparent border-none outline-none text-white placeholder-gray-400"
                         @keyup.enter="handleSendMessage"
                     />
@@ -86,6 +87,7 @@ interface Message {
 const messages = ref<Message[]>([]);
 const isLoading = ref(false);
 const inputText = ref("");
+const inputRef = ref<HTMLInputElement>();
 
 const currentModel = ref<string>("llama3.1-8b");
 const maxTokens = ref<number>(500);
@@ -266,5 +268,8 @@ onMounted(() => {
         sessionStorage.removeItem("initial-chat-prompt");
         sendMessage({ text: initialPrompt, files: [] });
     }
+    
+    // Focus the input field when component mounts
+    inputRef.value?.focus();
 });
 </script>
