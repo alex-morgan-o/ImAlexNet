@@ -1,12 +1,12 @@
 <template>
-    <div class="flex flex-1 overflow-hidden">
+    <div class="flex flex-1 overflow-hidden h-full">
         <!-- Sidebar -->
         <!-- <Sidebar @select-session="handleSelectSession" /> -->
 
         <!-- Chat Interface -->
-        <div class="flex-1 flex flex-col">
+        <div class="flex-1 flex flex-col h-full">
             <!-- Messages area -->
-            <div class="flex-1 overflow-y-auto p-4 space-y-4">
+            <div class="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
                 <ChatMessage
                     v-for="message in messages"
                     :key="message.id"
@@ -36,9 +36,26 @@
                         >
                     </div>
                 </div>
+            </div>
 
-                <!-- Chat Input -->
-                <ChatInput ref="chatInputRef" @send-message="sendMessage" />
+            <!-- Simple Chat Input - Fixed at bottom -->
+            <div class="border-t border-gray-700 p-4">
+                <div class="flex items-center space-x-2 p-4 bg-dark-300 rounded-lg">
+                    <input
+                        v-model="inputText"
+                        type="text"
+                        placeholder="Type your message..."
+                        class="flex-1 bg-transparent border-none outline-none text-white placeholder-gray-400"
+                        @keyup.enter="handleSendMessage"
+                    />
+                    <button
+                        @click="handleSendMessage"
+                        :disabled="!inputText.trim()"
+                        class="px-4 py-2 bg-primary-accent text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        Send
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -48,7 +65,6 @@
 import { ref, onMounted, watch } from "vue";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
-import ChatInput from "../components/ChatInput.vue";
 import {
     CerebrasService,
     type ChatMessage as CerebrasMessage,
@@ -69,7 +85,7 @@ interface Message {
 
 const messages = ref<Message[]>([]);
 const isLoading = ref(false);
-const chatInputRef = ref();
+const inputText = ref("");
 
 const currentModel = ref<string>("llama3.1-8b");
 const maxTokens = ref<number>(500);
@@ -77,6 +93,14 @@ const temperature = ref<number>(0.7);
 
 // Persistence key for this chat session
 const CHAT_SESSION_KEY = "alexnet-chat-session";
+
+function handleSendMessage() {
+    const text = inputText.value.trim();
+    if (text) {
+        sendMessage({ text, files: [] });
+        inputText.value = "";
+    }
+}
 
 async function sendMessage(messageData: { text: string; files: File[] }) {
     if (!messageData.text.trim()) return;
