@@ -6,6 +6,7 @@ import HomeScreen from './components/HomeScreen.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import ChatInput from './components/ChatInput.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import { CerebrasService, type ChatMessage as CerebrasMessage } from './services/cerebras'
 
 interface Message {
   id: string
@@ -26,14 +27,10 @@ const isLoading = ref(false)
 const chatInputRef = ref()
 const showSettings = ref(false)
 
-// Mock AI responses for development
-const mockResponses = [
-  "I'd be happy to help you with that! Let me analyze your request...",
-  "Here's what I found and my recommendations:",
-  "I can help you implement this solution. Here's the approach I suggest:",
-  "Let me break this down into steps for you:",
-  "I notice a few potential improvements we could make here:"
-]
+// Current AI model settings
+const currentModel = ref<string>('llama3.1-8b')
+const maxTokens = ref<number>(500)
+const temperature = ref<number>(0.7)
 
 async function handleStartChat(prompt: string) {
   currentView.value = 'chat'
@@ -57,67 +54,82 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
   isLoading.value = true
   chatInputRef.value?.setLoading(true)
   
-  // Simulate AI response delay
-  setTimeout(async () => {
-    try {
-      // In a real app, this would call the actual AI service
-      const response = await simulateAIResponse(messageData.text)
-      
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: response.content,
-        code: response.code,
-        timestamp: new Date(),
-        canApply: response.canApply
-      }
-      
-      messages.value.push(aiMessage)
-    } catch (error) {
-      console.error('Error getting AI response:', error)
-      
-      // Add error message
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: 'Sorry, I encountered an error processing your request. Please try again.',
-        timestamp: new Date()
-      }
-      messages.value.push(errorMessage)
-    } finally {
-      isLoading.value = false
-      chatInputRef.value?.setLoading(false)
+  try {
+    // Call Cerebras API
+    const response = await getCerebrasResponse(messageData.text)
+    
+    const aiMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      role: 'assistant',
+      content: response.content,
+      code: response.code,
+      timestamp: new Date(),
+      canApply: response.canApply
     }
-  }, 1500)
+    
+    messages.value.push(aiMessage)
+  } catch (error) {
+    console.error('Error getting AI response:', error)
+    
+    // Add error message
+    const errorMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      role: 'assistant',
+      content: 'Sorry, I encountered an error processing your request. Please try again.',
+      timestamp: new Date()
+    }
+    messages.value.push(errorMessage)
+  } finally {
+    isLoading.value = false
+    chatInputRef.value?.setLoading(false)
+  }
 }
 
-async function simulateAIResponse(userInput: string) {
-  // Mock AI response based on user input
-  const baseResponse = mockResponses[Math.floor(Math.random() * mockResponses.length)]
+async function getCerebrasResponse(userInput: string) {
+  // Convert current messages to Cerebras format for context
+  const contextMessages: CerebrasMessage[] = CerebrasService.formatMessages(
+    messages.value.slice(-6) // Include last 6 messages for context
+  )
   
-  // Detect if user is asking for code
-  const isCodeRequest = /code|function|class|method|implement|write|create/i.test(userInput)
+  // Add the current user input
+  contextMessages.push({
+    role: 'user',
+    content: userInput
+  })
   
-  let response = {
-    content: baseResponse,
-    code: null as any,
-    canApply: false
+  // Call Cerebras chat API
+  const response = await CerebrasService.chat(contextMessages, {
+    model: currentModel.value,
+    max_tokens: maxTokens.value,
+    temperature: temperature.value
+  })
+  
+  if (!response.success) {
+    throw new Error(response.error || 'Failed to get response from Cerebras')
   }
   
-  if (isCodeRequest) {
-    response.code = {
-      language: 'javascript',
-      content: `function example() {
-  // This is a mock code response
-  console.log('Hello from AlexNet!');
-  return 'Generated code example';
-}`
+  const content = response.data?.message || response.data?.text || 'No response received'
+  
+  // Detect if response contains code
+  const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g
+  const codeMatch = codeBlockRegex.exec(content)
+  
+  let code: { language: string; content: string } | undefined = undefined
+  let canApply = false
+  
+  if (codeMatch) {
+    code = {
+      language: codeMatch[1] || 'text',
+      content: codeMatch[2].trim()
     }
-    response.canApply = true
-    response.content += '\n\nHere\'s the code implementation:'
+    canApply = true
   }
   
-  return response
+  return {
+    content,
+    code,
+    canApply
+  }
 }
 
 function handleApplyChanges(message: Message) {

@@ -74,7 +74,7 @@ const modelValue = useVModel(props, "modelValue", emits, {
 // Placeholder rotation functionality
 const currentPlaceholder = ref("");
 const placeholderIndex = ref(0);
-let placeholderInterval: number | null = null;
+let placeholderInterval: ReturnType<typeof setInterval> | null = null;
 
 const placeholders = [
     "ask me anything...",
