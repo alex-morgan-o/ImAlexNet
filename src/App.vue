@@ -13,6 +13,13 @@ function handleNewSession() {
   router.push('/')
 }
 
+function handleSelectSession(sessionId: string) {
+  // Load the selected session and navigate to chat
+  console.log('Loading session:', sessionId)
+  // The ChatView component will handle loading the session from localStorage
+  router.push('/chat')
+}
+
 function handleOpenSettings() {
   showSettings.value = true
 }
@@ -27,6 +34,7 @@ function handleCloseSettings() {
     <!-- Toolbar -->
     <Toolbar
       @new-session="handleNewSession"
+      @select-session="handleSelectSession"
       @toggle-os="() => console.log('Toggle OS integration')"
       @save="() => console.log('Save session')"
       @share="() => console.log('Share session')"
