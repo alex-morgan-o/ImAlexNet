@@ -1,51 +1,28 @@
 <template>
     <div class="relative">
         <!-- Sidebar Overlay -->
-        <div
-            v-if="showSidebar"
-            class="fixed inset-0 z-50 flex"
-            @click.self="hideSidebar"
-        >
-            <!-- Sidebar -->
+        <Transition name="sidebar" appear>
             <div
-                class="w-80 h-full bg-card border-r border-border shadow-2xl bg-slate-600"
+                v-if="showSidebar"
+                class="fixed inset-0 z-50 flex"
+                @click.self="hideSidebar"
             >
+                <!-- Sidebar -->
                 <div
-                    class="flex items-center justify-between p-4 border-b border-border"
+                    class="sidebar-panel w-80 h-full bg-card border-r border-border shadow-2xl bg-slate-600"
                 >
-                    <h2 class="text-lg font-semibold text-foreground">
-                        Chat Sessions
-                    </h2>
-                    <button
-                        @click="hideSidebar"
-                        class="hover:bg-muted rounded-lg transition-colors"
+                    <div
+                        class="flex items-center justify-between p-4 border-b border-border"
                     >
-                        <svg
-                            class="w-5 h-5"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                        >
-                            <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M6 18L18 6M6 6l12 12"
-                            />
-                        </svg>
-                    </button>
-                </div>
-
-                <!-- Session list -->
-                <div class="flex-1 overflow-y-auto px-2 pb-4">
-                    <!-- New Session Button -->
-                    <div class="mb-4 px-2">
+                        <h2 class="text-lg font-semibold text-foreground">
+                            Chat Sessions
+                        </h2>
                         <button
-                            @click="handleNewSession"
-                            class="w-full flex items-center justify-center space-x-2 p-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
+                            @click="hideSidebar"
+                            class="hover:bg-muted rounded-lg transition-colors"
                         >
                             <svg
-                                class="w-4 h-4"
+                                class="w-5 h-5"
                                 fill="none"
                                 stroke="currentColor"
                                 viewBox="0 0 24 24"
@@ -54,126 +31,153 @@
                                     stroke-linecap="round"
                                     stroke-linejoin="round"
                                     stroke-width="2"
-                                    d="M12 4v16m8-8H4"
+                                    d="M6 18L18 6M6 6l12 12"
                                 />
                             </svg>
-                            <span class="font-medium">New Session</span>
                         </button>
                     </div>
 
-                    <div v-if="todaySessions.length > 0" class="mb-4">
-                        <h3
-                            class="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 px-2"
-                        >
-                            Today
-                        </h3>
-                        <div
-                            v-for="session in todaySessions"
-                            :key="session.id"
-                            :class="[
-                                'sidebar-item',
-                                { active: session.id === activeSessionId },
-                            ]"
-                            @click="handleSelectSession(session.id)"
-                        >
-                            <div class="flex-1 min-w-0">
-                                <p
-                                    class="text-sm font-medium truncate text-foreground"
+                    <!-- Session list -->
+                    <div class="flex-1 overflow-y-auto px-2 pb-4">
+                        <!-- New Session Button -->
+                        <div class="mb-4 px-2">
+                            <button
+                                @click="handleNewSession"
+                                class="w-full flex items-center justify-center space-x-2 p-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
+                            >
+                                <svg
+                                    class="w-4 h-4"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    viewBox="0 0 24 24"
                                 >
-                                    {{ session.title }}
-                                </p>
-                                <p
-                                    class="text-xs text-muted-foreground truncate"
-                                >
-                                    {{ session.preview }}
-                                </p>
-                            </div>
-                            <span class="text-xs text-muted-foreground">{{
-                                formatTime(session.timestamp)
-                            }}</span>
+                                    <path
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        stroke-width="2"
+                                        d="M12 4v16m8-8H4"
+                                    />
+                                </svg>
+                                <span class="font-medium">New Session</span>
+                            </button>
                         </div>
-                    </div>
 
-                    <div v-if="yesterdaySessions.length > 0" class="mb-4">
-                        <h3
-                            class="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 px-2"
-                        >
-                            Yesterday
-                        </h3>
-                        <div
-                            v-for="session in yesterdaySessions"
-                            :key="session.id"
-                            :class="[
-                                'sidebar-item',
-                                { active: session.id === activeSessionId },
-                            ]"
-                            @click="handleSelectSession(session.id)"
-                        >
-                            <div class="flex-1 min-w-0">
-                                <p
-                                    class="text-sm font-medium truncate text-foreground"
-                                >
-                                    {{ session.title }}
-                                </p>
-                                <p
-                                    class="text-xs text-muted-foreground truncate"
-                                >
-                                    {{ session.preview }}
-                                </p>
+                        <div v-if="todaySessions.length > 0" class="mb-4">
+                            <h3
+                                class="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 px-2"
+                            >
+                                Today
+                            </h3>
+                            <div
+                                v-for="session in todaySessions"
+                                :key="session.id"
+                                :class="[
+                                    'sidebar-item',
+                                    { active: session.id === activeSessionId },
+                                ]"
+                                @click="handleSelectSession(session.id)"
+                            >
+                                <div class="flex-1 min-w-0">
+                                    <p
+                                        class="text-sm font-medium truncate text-foreground"
+                                    >
+                                        {{ session.title }}
+                                    </p>
+                                    <p
+                                        class="text-xs text-muted-foreground truncate"
+                                    >
+                                        {{ session.preview }}
+                                    </p>
+                                </div>
+                                <span class="text-xs text-muted-foreground">{{
+                                    formatTime(session.timestamp)
+                                }}</span>
                             </div>
-                            <span class="text-xs text-muted-foreground">{{
-                                formatTime(session.timestamp)
-                            }}</span>
                         </div>
-                    </div>
 
-                    <div v-if="weekSessions.length > 0" class="mb-4">
-                        <h3
-                            class="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 px-2"
-                        >
-                            Previous 7 days
-                        </h3>
-                        <div
-                            v-for="session in weekSessions"
-                            :key="session.id"
-                            :class="[
-                                'sidebar-item',
-                                { active: session.id === activeSessionId },
-                            ]"
-                            @click="handleSelectSession(session.id)"
-                        >
-                            <div class="flex-1 min-w-0">
-                                <p
-                                    class="text-sm font-medium truncate text-foreground"
-                                >
-                                    {{ session.title }}
-                                </p>
-                                <p
-                                    class="text-xs text-muted-foreground truncate"
-                                >
-                                    {{ session.preview }}
-                                </p>
+                        <div v-if="yesterdaySessions.length > 0" class="mb-4">
+                            <h3
+                                class="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 px-2"
+                            >
+                                Yesterday
+                            </h3>
+                            <div
+                                v-for="session in yesterdaySessions"
+                                :key="session.id"
+                                :class="[
+                                    'sidebar-item',
+                                    { active: session.id === activeSessionId },
+                                ]"
+                                @click="handleSelectSession(session.id)"
+                            >
+                                <div class="flex-1 min-w-0">
+                                    <p
+                                        class="text-sm font-medium truncate text-foreground"
+                                    >
+                                        {{ session.title }}
+                                    </p>
+                                    <p
+                                        class="text-xs text-muted-foreground truncate"
+                                    >
+                                        {{ session.preview }}
+                                    </p>
+                                </div>
+                                <span class="text-xs text-muted-foreground">{{
+                                    formatTime(session.timestamp)
+                                }}</span>
                             </div>
-                            <span class="text-xs text-muted-foreground">{{
-                                formatDate(session.timestamp)
-                            }}</span>
                         </div>
-                    </div>
 
-                    <div
-                        v-if="filteredSessions.length === 0"
-                        class="text-center py-8"
-                    >
-                        <p class="text-muted-foreground text-sm">
-                            No sessions found
-                        </p>
+                        <div v-if="weekSessions.length > 0" class="mb-4">
+                            <h3
+                                class="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 px-2"
+                            >
+                                Previous 7 days
+                            </h3>
+                            <div
+                                v-for="session in weekSessions"
+                                :key="session.id"
+                                :class="[
+                                    'sidebar-item',
+                                    { active: session.id === activeSessionId },
+                                ]"
+                                @click="handleSelectSession(session.id)"
+                            >
+                                <div class="flex-1 min-w-0">
+                                    <p
+                                        class="text-sm font-medium truncate text-foreground"
+                                    >
+                                        {{ session.title }}
+                                    </p>
+                                    <p
+                                        class="text-xs text-muted-foreground truncate"
+                                    >
+                                        {{ session.preview }}
+                                    </p>
+                                </div>
+                                <span class="text-xs text-muted-foreground">{{
+                                    formatDate(session.timestamp)
+                                }}</span>
+                            </div>
+                        </div>
+
+                        <div
+                            v-if="filteredSessions.length === 0"
+                            class="text-center py-8"
+                        >
+                            <p class="text-muted-foreground text-sm">
+                                No sessions found
+                            </p>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- Backdrop -->
-            <div class="flex-1 bg-black bg-opacity-50"></div>
-        </div>
+                <!-- Backdrop -->
+                <div
+                    class="sidebar-backdrop flex-1 bg-black bg-opacity-50"
+                ></div>
+            </div>
+        </Transition>
 
         <!-- Main Toolbar -->
         <div
@@ -183,7 +187,7 @@
             <div class="flex items-center space-x-3">
                 <button
                     @click="toggleSidebar"
-                    class="toolbar-icon hover:bg-muted rounded-lg transition-colors"
+                    class="hover:bg-muted transition-colors"
                 >
                     <svg
                         class="w-5 h-5"
@@ -199,7 +203,7 @@
                         />
                     </svg>
                 </button>
-                <h1 class="text-lg font-semibold text-foreground">AlexNet</h1>
+                <h1 class="text-md font-semibold text-foreground">AlexNet</h1>
             </div>
 
             <!-- Center section -->
@@ -372,26 +376,26 @@ async function loadSessions() {
     try {
         // Load sessions from the new session management system
         const sessionItems = await SessionManagerService.listSessions();
-        
-        const sessions: Session[] = sessionItems.map(item => ({
+
+        const sessions: Session[] = sessionItems.map((item) => ({
             id: item.id,
             title: item.name,
-            preview: item.preview || 'No messages yet',
-            timestamp: new Date(item.last_modified)
+            preview: item.preview || "No messages yet",
+            timestamp: new Date(item.last_modified),
         }));
-        
+
         // If no sessions exist, try to load legacy localStorage sessions
         if (sessions.length === 0) {
             const legacySessions = await loadLegacySessions();
             sessions.push(...legacySessions);
         }
-        
+
         // Sort sessions by timestamp (newest first)
         allSessions.value = sessions.sort(
             (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
         );
     } catch (error) {
-        console.error('Failed to load sessions:', error);
+        console.error("Failed to load sessions:", error);
         // Fallback to legacy loading
         allSessions.value = await loadLegacySessions();
     }
@@ -469,3 +473,104 @@ onMounted(() => {
     loadSessions();
 });
 </script>
+
+<style scoped>
+.toolbar-icon {
+    @apply p-2 text-foreground hover:bg-muted rounded-lg transition-colors;
+}
+
+.toolbar-icon svg {
+    @apply w-5 h-5;
+}
+
+.sidebar-item {
+    @apply flex items-center justify-between p-3 mx-2 mb-1 rounded-lg cursor-pointer hover:bg-muted transition-colors;
+}
+
+.sidebar-item.active {
+    @apply bg-blue-500/10 border-l-2 border-blue-500;
+}
+
+/* Enhanced sidebar transition animations */
+.sidebar-enter-active,
+.sidebar-leave-active {
+    transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-enter-from,
+.sidebar-leave-to {
+    opacity: 0;
+}
+
+.sidebar-enter-to,
+.sidebar-leave-from {
+    opacity: 1;
+}
+
+/* Sidebar panel smooth slide animation */
+.sidebar-panel {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transform: translateX(0);
+}
+
+.sidebar-enter-active .sidebar-panel {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-leave-active .sidebar-panel {
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+.sidebar-enter-from .sidebar-panel,
+.sidebar-leave-to .sidebar-panel {
+    transform: translateX(-100%);
+}
+
+/* Backdrop smooth fade animation */
+.sidebar-backdrop {
+    transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-enter-active .sidebar-backdrop {
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1) 0.05s;
+}
+
+.sidebar-leave-active .sidebar-backdrop {
+    transition: opacity 0.2s cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+.sidebar-enter-from .sidebar-backdrop,
+.sidebar-leave-to .sidebar-backdrop {
+    opacity: 0;
+}
+
+/* Add subtle shadow animation */
+.sidebar-panel {
+    box-shadow:
+        0 10px 25px -5px rgba(0, 0, 0, 0.1),
+        0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    transition:
+        transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+        box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-enter-from .sidebar-panel {
+    box-shadow: none;
+}
+
+/* Smooth scrolling for session list */
+.sidebar-panel {
+    scroll-behavior: smooth;
+}
+
+/* Optimize for performance */
+.sidebar-panel,
+.sidebar-backdrop {
+    will-change: transform, opacity;
+}
+
+.sidebar-leave-active .sidebar-panel,
+.sidebar-leave-active .sidebar-backdrop {
+    will-change: auto;
+}
+</style>
