@@ -102,29 +102,9 @@
                         <span>Apply</span>
                     </button>
 
-                    <!-- <button
-                        @click="$emit('regenerate', message)"
-                        class="flex items-center space-x-1 px-3 py-1 text-xs bg-dark-300 text-primary-fg rounded-lg hover:bg-dark-200 transition-colors duration-200"
-                    >
-                        <svg
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                            class="w-3 h-3"
-                        >
-                            <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                            />
-                        </svg>
-                        <span>Regenerate</span>
-                    </button> -->
-
                     <button
                         @click="copyMessage(message.content)"
-                        class="flex items-center space-x-1 px-3 py-1 text-xs bg-dark-300 text-primary-fg rounded-lg hover:bg-dark-200 transition-colors duration-200"
+                        class="flex items-center space-x-1 px-1 py-1 text-xs bg-dark-300 text-primary-fg rounded-lg hover:bg-dark-200 transition-colors duration-200"
                     >
                         <svg
                             fill="none"
@@ -139,7 +119,6 @@
                                 d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
                             />
                         </svg>
-                        <span>Copy</span>
                     </button>
                 </div>
             </div>
@@ -148,18 +127,9 @@
 </template>
 
 <script setup lang="ts">
-interface Message {
-    id: string;
-    role: "user" | "assistant";
-    content?: string;
-    code?: {
-        language: string;
-        content: string;
-    };
-    files?: File[];
-    timestamp: Date;
-    canApply?: boolean;
-}
+import type { FrontendMessage } from '../services/sessionManager';
+
+type Message = FrontendMessage;
 
 defineProps<{
     message: Message;
@@ -168,12 +138,17 @@ defineProps<{
 defineEmits(["apply-changes", "regenerate"]);
 
 function formatMessage(content: string): string {
-    // Simple markdown-like formatting
+    // Enhanced markdown-like formatting with better code block handling
     return content
         .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
         .replace(/\*(.*?)\*/g, "<em>$1</em>")
+        .replace(/```[\s\S]*?```/g, (match) => {
+            // Handle multi-line code blocks
+            const codeContent = match.replace(/```(\w+)?\n?/, '').replace(/```$/, '');
+            return `<pre class="bg-dark-700 rounded-lg p-4 mt-2 mb-2 overflow-x-auto"><code class="text-sm font-mono text-primary-fg">${codeContent}</code></pre>`;
+        })
         .replace(
-            /`(.*?)`/g,
+            /`([^`]+)`/g,
             '<code class="bg-dark-600 px-1 py-0.5 rounded text-sm">$1</code>',
         )
         .replace(/\n/g, "<br>");

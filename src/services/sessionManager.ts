@@ -1,5 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 
+// Shell command result interface (matching Rust backend)
+export interface ShellCommandResult {
+  success: boolean
+  stdout: string
+  stderr: string
+  exit_code?: number
+}
+
 // Types matching Rust backend
 export interface ChatMessage {
   id: string
@@ -12,6 +20,8 @@ export interface ChatMessage {
   files: string[]
   timestamp: string // ISO string from backend
   can_apply?: boolean
+  command_result?: ShellCommandResult
+  is_executing_command?: boolean
 }
 
 export interface SessionMetadata {
@@ -51,6 +61,8 @@ export interface FrontendMessage {
   files?: File[]
   timestamp: Date
   canApply?: boolean
+  commandResult?: ShellCommandResult
+  isExecutingCommand?: boolean
 }
 
 export class SessionManagerService {
@@ -94,7 +106,9 @@ export class SessionManagerService {
       code: message.code,
       files: message.files?.map(f => f.name) || [], // Just store file names for now
       timestamp: message.timestamp.toISOString(),
-      can_apply: message.canApply
+      can_apply: message.canApply,
+      command_result: message.commandResult,
+      is_executing_command: message.isExecutingCommand
     }
     
     await invoke<void>('save_chat_message', {
@@ -179,7 +193,9 @@ export class SessionManagerService {
         code: msg.code,
         files: [], // Files not implemented in full yet
         timestamp: new Date(msg.timestamp),
-        canApply: msg.can_apply
+        canApply: msg.can_apply,
+        commandResult: msg.command_result,
+        isExecutingCommand: msg.is_executing_command
       }))
   }
   

@@ -13,6 +13,7 @@
                     :message="message"
                     @apply-changes="handleApplyChanges"
                     @regenerate="handleRegenerateMessage"
+                    @command-executed="handleCommandExecuted"
                 />
 
 
@@ -67,18 +68,20 @@
 import { ref, onMounted, nextTick } from "vue";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
-import {
-    CerebrasService,
-    type ChatMessage as CerebrasMessage,
-} from "../services/cerebras";
+// import {
+//     CerebrasService,
+//     type ChatMessage as CerebrasMessage,
+// } from "../services/cerebras";
 import {
     sessionManager,
     type FrontendMessage,
     type ChatSession,
-    SessionManagerService
+    SessionManagerService,
+    type ShellCommandResult
 } from "../services/sessionManager";
+import { ChainOfThoughtProcessor, type ChainOfThoughtResult } from "../services/chainOfThoughtProcessor";
 
-// Use the FrontendMessage type from session manager
+// Use the FrontendMessage type from session manager (now includes command result)
 type Message = FrontendMessage;
 
 const messages = ref<Message[]>([]);
@@ -88,10 +91,7 @@ const inputRef = ref<HTMLInputElement>();
 const messagesContainer = ref<HTMLElement>();
 const currentSession = ref<ChatSession | null>(null);
 
-// Model configuration
-const currentModel = ref<string>("llama3.1-8b");
-const maxTokens = ref<number>(500);
-const temperature = ref<number>(0.7);
+// Model configuration (removed individual refs since handled in chain of thought processor)
 
 function handleSendMessage() {
     const text = inputText.value.trim();
@@ -128,33 +128,28 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
     isLoading.value = true;
 
     try {
-        // Get recent messages for context
-        const contextMessages: CerebrasMessage[] = CerebrasService.formatMessages(
-            messages.value.slice(-4), // Include recent messages for context
-        );
+        // Get recent messages for context (convert to simple format)
+        const contextMessages = messages.value.slice(-4).map(msg => ({
+            role: msg.role,
+            content: msg.content || ''
+        }));
         
-        // Make direct API call to Cerebras
-        const response = await CerebrasService.chat(contextMessages, {
-            model: currentModel.value,
-            max_tokens: maxTokens.value,
-            temperature: temperature.value
-        });
+        // Use chain-of-thought processing to determine actions
+        const thoughtResult: ChainOfThoughtResult = await ChainOfThoughtProcessor.processUserMessage(
+            messageData.text,
+            contextMessages
+        );
 
-        // Extract response content
-        const responseContent = response.success && response.data?.message
-            ? response.data.message
-            : "I'm here to help! Could you provide more details about what you'd like me to do?";
-
-        // Add AI response message
+        // Create initial AI message with the reasoning response
         const aiMessage: Message = {
             id: (Date.now() + 1).toString(),
             role: "assistant",
-            content: responseContent,
+            content: thoughtResult.final_response,
             timestamp: new Date(),
         };
         messages.value.push(aiMessage);
 
-        // Auto-save AI message to session
+        // Auto-save initial AI message
         try {
             await sessionManager.saveMessage(aiMessage);
         } catch (error) {
@@ -163,6 +158,55 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
 
         // Scroll to show AI response
         await smoothScrollToBottom();
+
+        // Execute commands if any were determined
+        if (thoughtResult.commands_to_execute && thoughtResult.commands_to_execute.length > 0) {
+            console.log("🚀 About to execute commands:", thoughtResult.commands_to_execute);
+            // Show that commands are being executed
+            isLoading.value = true;
+            
+            const commandResults = await ChainOfThoughtProcessor.executeCommands(
+                thoughtResult.commands_to_execute
+            );
+            console.log("✅ Command execution results:", commandResults);
+
+            // Update the AI message with command results
+            let updatedContent = thoughtResult.final_response;
+            
+            for (let i = 0; i < commandResults.length; i++) {
+                const result = commandResults[i];
+                
+                updatedContent += `\n\n**${result.explanation}**\n`;
+                
+                if (result.success) {
+                    updatedContent += `\`\`\`\n${result.output}\n\`\`\``;
+                } else {
+                    updatedContent += `❌ Error: ${result.error}`;
+                }
+            }
+
+            // Update the message content reactively so Vue re-renders
+            const aiIndex = messages.value.findIndex(m => m.id === aiMessage.id);
+            if (aiIndex !== -1) {
+                messages.value[aiIndex] = {
+                    ...messages.value[aiIndex],
+                    content: updatedContent
+                };
+            } else {
+                // Fallback (shouldn't happen): mutate the object reference
+                aiMessage.content = updatedContent;
+            }
+            
+            // Save updated message
+            try {
+                await sessionManager.saveMessage(aiMessage);
+            } catch (error) {
+                console.warn('Failed to save updated AI message:', error);
+            }
+
+            // Scroll to show updated response
+            await smoothScrollToBottom();
+        }
 
     } catch (error) {
         console.error("Error getting response from Cerebras:", error);
@@ -230,6 +274,25 @@ async function handleRegenerateMessage(message: Message) {
                 files: userMessage.files || [],
             });
         }
+    }
+}
+
+// Handle shell command execution results
+async function handleCommandExecuted(event: { messageId: string; result: ShellCommandResult }) {
+    const messageIndex = messages.value.findIndex(m => m.id === event.messageId);
+    if (messageIndex !== -1) {
+        // Update the message with command result
+        messages.value[messageIndex].commandResult = event.result;
+        
+        // Save the updated message to session
+        try {
+            await sessionManager.saveMessage(messages.value[messageIndex]);
+        } catch (error) {
+            console.warn('Failed to save command result:', error);
+        }
+        
+        // Scroll to show the result
+        await smoothScrollToBottom();
     }
 }
 

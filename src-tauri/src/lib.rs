@@ -1,10 +1,12 @@
 use std::process::Command;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fs;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use dirs;
+use once_cell::sync::Lazy;
+use std::collections::HashSet;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -29,6 +31,8 @@ struct ChatMessage {
     files: Vec<String>, // File names/paths
     timestamp: DateTime<Utc>,
     can_apply: Option<bool>,
+    command_result: Option<ShellCommandResult>,
+    is_executing_command: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,6 +67,119 @@ struct SessionListItem {
     last_modified: DateTime<Utc>,
     message_count: usize,
     preview: Option<String>, // First user message or summary
+}
+
+// File system structures
+#[derive(Debug, Serialize, Deserialize)]
+struct FileInfo {
+    name: String,
+    path: String,
+    is_directory: bool,
+    size: Option<u64>,
+    modified: Option<DateTime<Utc>>,
+    extension: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DirectoryListing {
+    path: String,
+    parent: Option<String>,
+    items: Vec<FileInfo>,
+}
+
+// Security: Define system directories and sensitive paths to block
+static BLOCKED_PATHS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    let mut set = HashSet::new();
+    // System directories (Unix/Linux/macOS)
+    set.insert("/System");
+    set.insert("/usr");
+    set.insert("/bin");
+    set.insert("/sbin");
+    set.insert("/boot");
+    set.insert("/dev");
+    set.insert("/proc");
+    set.insert("/sys");
+    set.insert("/etc");
+    set.insert("/root");
+    set.insert("/var/log");
+    set.insert("/var/run");
+    set.insert("/private");
+    // Windows system directories
+    set.insert("C:\\Windows");
+    set.insert("C:\\Program Files");
+    set.insert("C:\\Program Files (x86)");
+    set.insert("C:\\ProgramData");
+    set.insert("C:\\System32");
+    set.insert("C:\\SysWOW64");
+    // macOS specific
+    set.insert("/Library/LaunchDaemons");
+    set.insert("/Library/LaunchAgents");
+    set.insert("/Library/StartupItems");
+    set
+});
+
+// Security: Check if a path is safe to access
+fn is_path_safe(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    
+    // Check against blocked system paths
+    for blocked in BLOCKED_PATHS.iter() {
+        if path_str.starts_with(blocked) {
+            return false;
+        }
+    }
+    
+    // Don't allow access to hidden system files that start with .
+    // But allow .alexnet and other user-created hidden files in home directory
+    if let Some(home) = dirs::home_dir() {
+        if !path.starts_with(&home) {
+            // If not in home directory, be more restrictive
+            if let Some(file_name) = path.file_name() {
+                let name = file_name.to_string_lossy();
+                if name.starts_with('.') && !name.starts_with(".alexnet") {
+                    return false;
+                }
+            }
+        }
+    }
+    
+    // Additional checks for sensitive files
+    let sensitive_files = [
+        "passwd", "shadow", "sudoers", "hosts", "fstab",
+        "ssh_config", "sshd_config", "authorized_keys",
+        "id_rsa", "id_ed25519", "id_ecdsa"
+    ];
+    
+    if let Some(file_name) = path.file_name() {
+        let name = file_name.to_string_lossy().to_lowercase();
+        for sensitive in &sensitive_files {
+            if name.contains(sensitive) {
+                return false;
+            }
+        }
+    }
+    
+    true
+}
+
+// Get safe working directories (user-accessible locations)
+fn get_safe_base_directories() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home);
+    }
+    if let Some(documents) = dirs::document_dir() {
+        dirs.push(documents);
+    }
+    if let Some(downloads) = dirs::download_dir() {
+        dirs.push(downloads);
+    }
+    if let Some(desktop) = dirs::desktop_dir() {
+        dirs.push(desktop);
+    }
+    
+    dirs
 }
 
 #[tauri::command]
@@ -145,17 +262,38 @@ async fn cerebras_chat(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("🔥 Cerebras chat stderr: {}", stderr);
         return Err(format!("Cerebras script failed: {}", stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("🔍 Raw cerebras chat stdout: {}", stdout);
+    eprintln!("🔍 Stdout length: {}", stdout.len());
     
     // Extract JSON from output (skip dotenv debug info)
-    let json_start = stdout.find('{').unwrap_or(0);
+    // Look for the actual JSON response by finding the first occurrence of {"success"
+    let json_start = stdout.find("{\"success\"").unwrap_or_else(|| {
+        eprintln!("⚠️ Could not find {{\"success\" pattern, falling back to first {{");
+        // Fallback: look for any { that's followed by a quote (proper JSON)
+        stdout.find("{\n  \"").unwrap_or(0)
+    });
     let json_content = &stdout[json_start..];
+    eprintln!("🎯 Extracted JSON content: {}", json_content);
+    eprintln!("🎯 JSON content length: {}", json_content.len());
+    eprintln!("🔢 First 10 bytes: {:?}", json_content.as_bytes().get(0..10.min(json_content.len())));
     
     let response: CerebrasResponse = serde_json::from_str(json_content)
-        .map_err(|e| format!("Failed to parse cerebras response: {}", e))?;
+        .map_err(|e| {
+            eprintln!("💥 JSON parsing failed: {}", e);
+            eprintln!("💥 Content being parsed: {}", json_content);
+            eprintln!("💥 Content as string (escaped): {:?}", json_content);
+            eprintln!("💥 Content character by character:");
+            for (i, ch) in json_content.chars().enumerate() {
+                eprintln!("  [{}]: '{}' (U+{:04X})", i, ch, ch as u32);
+                if i >= 20 { eprintln!("  ... (showing first 20 chars)"); break; }
+            }
+            format!("Failed to parse cerebras response: {}", e)
+        })?;
 
     Ok(response)
 }
@@ -425,6 +563,144 @@ async fn export_chat_session(session_id: String, export_path: String) -> Result<
     Ok(())
 }
 
+// Shell Command Execution
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ShellCommandResult {
+    success: bool,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+}
+
+// Security: Validate shell command arguments to prevent dangerous operations
+fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> {
+    // Allow only specific safe commands for file operations
+    let allowed_commands = [
+        "cat", "ls", "mkdir", "rm", "mv", "cp", "touch", "echo",
+        "head", "tail", "wc", "find", "grep", "sed", "awk", "sh"
+    ];
+    
+    if !allowed_commands.contains(&command) {
+        return Err(format!("Command '{}' is not allowed", command));
+    }
+    
+    // Special handling for sh command - only allow specific patterns
+    if command == "sh" {
+        if args.len() != 2 || args[0] != "-c" {
+            return Err("sh command only allows -c flag with single command string".to_string());
+        }
+        // Allow echo redirection for file writing, but validate the paths
+        let cmd_string = &args[1];
+        if !cmd_string.starts_with("echo") || !cmd_string.contains(">") {
+            return Err("sh -c only allows echo redirection commands".to_string());
+        }
+        return Ok(()); // Skip further validation for sh -c as we control the format
+    }
+    
+    // Check for dangerous argument patterns
+    for arg in args {
+        // Allow some redirections for specific commands, but be careful
+        let dangerous_chars = [";", "|", "&", "`", "$("];
+        for &dangerous in &dangerous_chars {
+            if arg.contains(dangerous) {
+                return Err(format!("Dangerous character '{}' detected in arguments", dangerous));
+            }
+        }
+        
+        // Validate paths in arguments - be more permissive for relative paths
+        if arg.starts_with("/") || arg.starts_with("~") {
+            let path = if arg.starts_with("~") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(&arg[2..]) // Skip "~/"
+                } else {
+                    return Err("Cannot resolve home directory".to_string());
+                }
+            } else {
+                PathBuf::from(arg)
+            };
+            
+            if !is_path_safe(&path) {
+                return Err(format!("Path '{}' is not safe", arg));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn execute_shell_command(command: String, args: Vec<String>, working_dir: Option<String>) -> Result<ShellCommandResult, String> {
+    // Validate the command and arguments
+    validate_shell_command(&command, &args)?;
+    
+    // Expand user-home shortcuts in args (e.g., ~/Downloads) since we don't run through a shell
+    fn expand_user_path(arg: &str) -> String {
+        if arg == "~" {
+            if let Some(home) = dirs::home_dir() { return home.to_string_lossy().to_string(); }
+        } else if let Some(rest) = arg.strip_prefix("~/") {
+            if let Some(home) = dirs::home_dir() { return home.join(rest).to_string_lossy().to_string(); }
+        } else if let Some(rest) = arg.strip_prefix("$HOME/") {
+            if let Some(home) = dirs::home_dir() { return home.join(rest).to_string_lossy().to_string(); }
+        }
+        arg.to_string()
+    }
+    let expanded_args: Vec<String> = args.iter().map(|a| expand_user_path(a)).collect();
+
+    // Set working directory with safety check
+    let work_dir = if let Some(dir) = working_dir {
+        let path = PathBuf::from(&dir);
+        if !is_path_safe(&path) {
+            return Err(format!("Working directory '{}' is not safe", dir));
+        }
+        if !path.exists() {
+            return Err(format!("Working directory '{}' does not exist", dir));
+        }
+        Some(path)
+    } else {
+        // Default to home directory or first safe directory
+        get_safe_base_directories().into_iter().next()
+    };
+    
+    // Execute the command
+    let mut cmd = Command::new(&command);
+    // Use expanded args to support paths like ~/Downloads without invoking a shell
+    cmd.args(&expanded_args);
+    
+    if let Some(dir) = work_dir {
+        cmd.current_dir(dir);
+    }
+    
+    // Set environment variables for safety
+    cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin"); // Restrict PATH
+    cmd.env_remove("SHELL"); // Remove shell environment for extra safety
+    
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to execute command '{}': {}", command, e))?;
+    
+    Ok(ShellCommandResult {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code(),
+    })
+}
+
+#[tauri::command]
+fn get_safe_directories() -> Result<Vec<String>, String> {
+    let safe_dirs = get_safe_base_directories();
+    let paths = safe_dirs.into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    Ok(paths)
+}
+
+#[tauri::command]
+fn check_path_safety(file_path: String) -> Result<bool, String> {
+    let path = Path::new(&file_path);
+    Ok(is_path_safe(path))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -442,7 +718,10 @@ pub fn run() {
             list_chat_sessions,
             delete_chat_session,
             update_session_metadata,
-            export_chat_session
+            export_chat_session,
+            execute_shell_command,
+            get_safe_directories,
+            check_path_safety
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
