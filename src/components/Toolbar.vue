@@ -278,7 +278,9 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { SessionManagerService } from "../services/sessionManager";
 
+// Use the SessionListItem type from session manager, but adapt it
 interface Session {
     id: string;
     title: string;
@@ -366,8 +368,37 @@ function handleSelectSession(sessionId: string) {
     emit("select-session", sessionId);
 }
 
-function loadSessions() {
-    // Load all stored chat sessions from localStorage
+async function loadSessions() {
+    try {
+        // Load sessions from the new session management system
+        const sessionItems = await SessionManagerService.listSessions();
+        
+        const sessions: Session[] = sessionItems.map(item => ({
+            id: item.id,
+            title: item.name,
+            preview: item.preview || 'No messages yet',
+            timestamp: new Date(item.last_modified)
+        }));
+        
+        // If no sessions exist, try to load legacy localStorage sessions
+        if (sessions.length === 0) {
+            const legacySessions = await loadLegacySessions();
+            sessions.push(...legacySessions);
+        }
+        
+        // Sort sessions by timestamp (newest first)
+        allSessions.value = sessions.sort(
+            (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+        );
+    } catch (error) {
+        console.error('Failed to load sessions:', error);
+        // Fallback to legacy loading
+        allSessions.value = await loadLegacySessions();
+    }
+}
+
+// Legacy session loading for backwards compatibility
+async function loadLegacySessions(): Promise<Session[]> {
     const sessions: Session[] = [];
 
     // Get all localStorage keys that might be chat sessions
@@ -411,45 +442,12 @@ function loadSessions() {
                     }
                 }
             } catch (error) {
-                console.warn("Failed to parse session:", key, error);
+                console.warn("Failed to parse legacy session:", key, error);
             }
         }
     }
 
-    // If no real sessions exist, add some sample sessions for demo
-    if (sessions.length === 0) {
-        sessions.push(
-            {
-                id: "sample-1",
-                title: "Code Review Request",
-                preview: "Can you review my React component?",
-                timestamp: new Date(Date.now() - 1000 * 60 * 30), // 30 mins ago
-            },
-            {
-                id: "sample-2",
-                title: "Database Design Help",
-                preview: "Need help designing a user schema...",
-                timestamp: new Date(Date.now() - 1000 * 60 * 60 * 2), // 2 hours ago
-            },
-            {
-                id: "sample-3",
-                title: "API Documentation",
-                preview: "Generate docs for my REST API",
-                timestamp: new Date(Date.now() - 1000 * 60 * 60 * 24), // Yesterday
-            },
-            {
-                id: "sample-4",
-                title: "Bug Investigation",
-                preview: "Strange behavior in production...",
-                timestamp: new Date(Date.now() - 1000 * 60 * 60 * 24 * 3), // 3 days ago
-            },
-        );
-    }
-
-    // Sort sessions by timestamp (newest first)
-    allSessions.value = sessions.sort(
-        (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
-    );
+    return sessions;
 }
 
 function formatTime(timestamp: Date) {

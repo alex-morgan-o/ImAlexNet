@@ -64,40 +64,34 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, nextTick } from "vue";
+import { ref, onMounted, nextTick } from "vue";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
 import {
     CerebrasService,
     type ChatMessage as CerebrasMessage,
 } from "../services/cerebras";
+import {
+    sessionManager,
+    type FrontendMessage,
+    type ChatSession,
+    SessionManagerService
+} from "../services/sessionManager";
 
-interface Message {
-    id: string;
-    role: "user" | "assistant";
-    content?: string;
-    code?: {
-        language: string;
-        content: string;
-    };
-    files?: File[];
-    timestamp: Date;
-    canApply?: boolean;
-}
+// Use the FrontendMessage type from session manager
+type Message = FrontendMessage;
 
 const messages = ref<Message[]>([]);
 const isLoading = ref(false);
 const inputText = ref("");
 const inputRef = ref<HTMLInputElement>();
 const messagesContainer = ref<HTMLElement>();
+const currentSession = ref<ChatSession | null>(null);
 
-// Model configuration - these could be used for user settings later
-// const currentModel = ref<string>("llama3.1-8b");
-// const maxTokens = ref<number>(500);
-// const temperature = ref<number>(0.7);
-
-// Persistence key for this chat session
-const CHAT_SESSION_KEY = "alexnet-chat-session";
+// Model configuration
+const currentModel = ref<string>("llama3.1-8b");
+const maxTokens = ref<number>(500);
+const temperature = ref<number>(0.7);
 
 function handleSendMessage() {
     const text = inputText.value.trim();
@@ -120,6 +114,13 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
     };
     messages.value.push(userMessage);
 
+    // Auto-save user message to session
+    try {
+        await sessionManager.autoSaveMessage(userMessage);
+    } catch (error) {
+        console.warn('Failed to save user message:', error);
+    }
+
     // Scroll to show user message
     scrollToBottom();
 
@@ -134,9 +135,9 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
         
         // Make direct API call to Cerebras
         const response = await CerebrasService.chat(contextMessages, {
-            model: 'llama3.1-8b',
-            max_tokens: 500,
-            temperature: 0.7
+            model: currentModel.value,
+            max_tokens: maxTokens.value,
+            temperature: temperature.value
         });
 
         // Extract response content
@@ -153,6 +154,13 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
         };
         messages.value.push(aiMessage);
 
+        // Auto-save AI message to session
+        try {
+            await sessionManager.saveMessage(aiMessage);
+        } catch (error) {
+            console.warn('Failed to save AI message:', error);
+        }
+
         // Scroll to show AI response
         await smoothScrollToBottom();
 
@@ -168,6 +176,13 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
             timestamp: new Date(),
         };
         messages.value.push(errorMessage);
+
+        // Try to save error message too
+        try {
+            await sessionManager.saveMessage(errorMessage);
+        } catch (saveError) {
+            console.warn('Failed to save error message:', saveError);
+        }
 
         // Scroll to show error message
         await smoothScrollToBottom();
@@ -222,26 +237,43 @@ async function handleRegenerateMessage(message: Message) {
 //     console.log("Loading session:", sessionId);
 // }
 
-function saveMessagesToStorage() {
+async function loadSessionFromId(sessionId: string) {
     try {
-        const messagesForStorage = messages.value.map((msg) => ({
-            ...msg,
-            timestamp: msg.timestamp.toISOString(),
-            files: [],
-        }));
-        localStorage.setItem(
-            CHAT_SESSION_KEY,
-            JSON.stringify(messagesForStorage),
-        );
+        const session = await sessionManager.loadSession(sessionId);
+        currentSession.value = session;
+        messages.value = SessionManagerService.convertToFrontendMessages(session.messages);
+        console.log(`Loaded session: ${session.name} (${session.messages.length} messages)`);
     } catch (error) {
-        console.warn("Failed to save chat session:", error);
+        console.error('Failed to load session:', error);
+        // Create a new session if loading fails
+        await createNewSession();
     }
 }
 
+async function createNewSession(sessionName?: string) {
+    try {
+        const name = sessionName || 'New Chat';
+        const session = await sessionManager.createSession(name);
+        currentSession.value = session;
+        messages.value = [];
+        console.log(`Created new session: ${session.name}`);
+    } catch (error) {
+        console.error('Failed to create new session:', error);
+        // Fall back to localStorage for compatibility
+        localStorage.removeItem('alexnet-chat-session');
+    }
+}
 
+function clearCurrentSession() {
+    sessionManager.clearCurrentSession();
+    currentSession.value = null;
+    messages.value = [];
+}
+
+// Legacy support - load from localStorage if no session system
 function loadMessagesFromStorage() {
     try {
-        const saved = localStorage.getItem(CHAT_SESSION_KEY);
+        const saved = localStorage.getItem('alexnet-chat-session');
         if (saved) {
             const parsedMessages = JSON.parse(saved);
             messages.value = parsedMessages.map((msg: any) => ({
@@ -251,16 +283,53 @@ function loadMessagesFromStorage() {
             }));
         }
     } catch (error) {
-        console.warn("Failed to load chat session:", error);
+        console.warn('Failed to load legacy chat session:', error);
     }
 }
 
 
-// Watch messages, save to localStorage
-watch(messages, saveMessagesToStorage, { deep: true });
+// No longer need to watch messages for localStorage
+
+// Expose functions for App.vue to call
+defineExpose({
+    loadSession: loadSessionFromId,
+    createNewSession,
+    clearCurrentSession,
+    getCurrentSession: () => currentSession.value
+});
 
 onMounted(async () => {
-    loadMessagesFromStorage();
+    // Check if we should load a specific session from route params or storage
+    const sessionId = sessionStorage.getItem('load-session-id');
+    if (sessionId) {
+        sessionStorage.removeItem('load-session-id');
+        await loadSessionFromId(sessionId);
+    } else {
+        // Try to load from current session manager state or create new
+        const currentSessionId = sessionManager.getCurrentSessionId();
+        if (currentSessionId) {
+            await loadSessionFromId(currentSessionId);
+        } else {
+            // Check for legacy localStorage data
+            const hasLegacyData = localStorage.getItem('alexnet-chat-session');
+            if (hasLegacyData) {
+                loadMessagesFromStorage();
+                // Migrate to new session system if there are messages
+                if (messages.value.length > 0) {
+                    try {
+                        await createNewSession('Migrated Chat');
+                        // Save existing messages to new session
+                        for (const message of messages.value) {
+                            await sessionManager.saveMessage(message);
+                        }
+                        localStorage.removeItem('alexnet-chat-session');
+                    } catch (error) {
+                        console.warn('Failed to migrate legacy session:', error);
+                    }
+                }
+            }
+        }
+    }
     
     // Scroll to bottom after loading existing messages
     await nextTick();
