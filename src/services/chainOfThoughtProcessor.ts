@@ -17,6 +17,11 @@ export interface ChainOfThoughtResult {
   reasoning: string;
   steps: ChainOfThoughtStep[];
   final_response: string;
+  needs_user_path?: boolean;
+  path_request?: {
+    access?: "read" | "write" | "read_write";
+    prompt?: string;
+  };
   commands_to_execute?: Array<{
     command: string;
     args: string[];
@@ -117,43 +122,58 @@ export class ChainOfThoughtProcessor {
     }
     return out;
   }
-  private static readonly CHAIN_OF_THOUGHT_PROMPT = `You are AlexNet, an AI assistant. Analyze the user's request and determine what to do.
+  private static readonly CHAIN_OF_THOUGHT_PROMPT = `You are AlexNet, an AI assistant. Analyze the user's request and choose ONE primary action:
 
-If the request needs shell commands, include them. If it's just conversation, respond without commands.
+1) Simple response: If a natural reply suffices, respond conversationally. No commands.
+2) Execute shell: If shell is needed, include clear commands with args and brief explanations. Use safe defaults. Include working_dir when helpful.
+3) Ask for path: If you need to access files/folders and the exact path or permission isn't provided, ask the user for the precise path(s) and required access (read or write). Do NOT invent paths. No commands until path is confirmed.
+4) Search the web: Not supported yet. Inform the user with a concise placeholder and optionally ask a follow-up.
 
-Available commands: ls, cat, mkdir, rm, mv, cp, touch, echo, head, tail, wc, find, grep, sh
+Respond naturally first; a separate step will convert it to JSON. In your response, clearly state what you'll do next and, if executing, list the exact commands.
 
-Respond naturally, then I'll format it as JSON. Tell me:
-1. What response to give the user
-2. Any commands needed (command name, arguments, explanation)
+Tell me:
+- What to say to the user
+- Any commands needed (command name, arguments, optional working_dir, and a short explanation)
 
 Examples:
 
 User: "Hello"
-Response: Just say hi back to the user. No commands needed.
+Response: Hi! How can I help today? No commands needed.
 
-User: "List files in downloads"
-Response: I'll show the files in your downloads folder. Need to run: ls -la ~/Downloads to list all files in downloads folder.
+User: "List files in my Downloads"
+Response: I'll list your Downloads folder. Need to run: ls -la ~/Downloads to show detailed file listing.
+
+User: "Find all TODOs in my project"
+Response: To help with that, please provide the exact folder path to your project (read access), e.g., /Users/you/path/to/project.
+
+User: "Search the web for the latest Vue 3 docs"
+Response: Web search is not supported yet. Would you like me to help using any local docs or previously saved notes instead?
 
 User: "Create a file called test.txt with hello world"
-Response: I'll create that file for you. Need to run: sh -c "echo 'hello world' > test.txt" to create file with content.
+Response: I'll create that file. Need to run: sh -c "echo 'hello world' > test.txt" to create the file with the content.
 
-Be natural and helpful.`;
+Be natural, concise, and never fabricate file paths.`;
 
   private static readonly JSON_FORMATTER_PROMPT = `You are a JSON formatter. Convert the natural language response into this exact JSON format:
 
 {
     "final_response": "response to user",
+    "needs_user_path": false,
+    "path_request": { "access": "read" | "write" | "read_write", "prompt": "optional guidance to user" },
     "commands_to_execute": [
         {
             "command": "command_name",
             "args": ["arg1", "arg2"],
-            "explanation": "what this command does"
+            "explanation": "what this command does",
+            "working_dir": "/optional/working/directory"
         }
     ]
 }
 
-If no commands mentioned, use empty array: "commands_to_execute": []
+Rules:
+- If the analysis asks the user for a file/folder path or permission, set "needs_user_path": true, include a concise guidance string in "path_request.prompt" and the requested access level in "path_request.access" (read/write/read_write). Also set "commands_to_execute" to [] and put the question in "final_response". Do not invent paths.
+- If the analysis indicates a web search, set "final_response" to a concise notice like "Web search is not supported yet." (optionally include a follow-up question). Set "commands_to_execute" to [].
+- If there are commands, include exact command and args. Use an empty array when there are none.
 
 Return ONLY valid JSON, nothing else.`;
 
@@ -176,6 +196,26 @@ Return ONLY valid JSON, nothing else.`;
     }
   }
 
+  // Validation prompts to ensure response quality and adherence to rules
+  private static readonly VALIDATOR_PROMPT = `You are a strict validator for an AI assistant's draft reply.
+
+Decide if the draft correctly addresses the user's request under these rules:
+- If the task requires accessing local files/folders (e.g., analyze codebase/project, read/modify local files), the assistant must ask for the exact path(s) and required access (read/write) unless already provided. It must not invent paths.
+- If the task requires shell operations (e.g., list files, create/edit files, run tools), include concrete shell commands with arguments and a short explanation. Use an optional working_dir when helpful.
+- If the user asks to search the web, the assistant must state: "Web search is not supported yet." and may ask a relevant follow-up. No commands.
+- If the request is pure conversation, a simple response without commands is acceptable.
+
+Return ONLY this minified JSON object:
+{"verdict":"pass"|"fail","reasons":string[],"required_changes":string[]}`;
+
+  private static readonly REFINER_PROMPT = `You are revising an assistant's reply to satisfy strict requirements. Improve the draft so it fully complies with the validator feedback and rules:
+- Ask for precise file/folder path(s) and access type when local access is implied but not provided.
+- Include specific shell commands when appropriate.
+- For web search requests, say "Web search is not supported yet." and optionally ask a follow-up.
+- Keep the reply natural and concise. Do not fabricate file paths.
+
+Return ONLY the improved natural language reply.`;
+
   private static progress(
     onProgress: ((event: CoTProgressEvent) => void) | undefined,
     text: string,
@@ -193,72 +233,136 @@ Return ONLY valid JSON, nothing else.`;
     onProgress?: (event: CoTProgressEvent) => void,
   ): Promise<ChainOfThoughtResult> {
     try {
-      // Step 1: Get natural language analysis
-      const analysisMessages = [
-        {
-          role: "system",
-          content: this.CHAIN_OF_THOUGHT_PROMPT,
-        },
-        ...context.slice(-3),
-        {
-          role: "user",
-          content: userMessage,
-        },
-      ];
-
-      console.log("🔍 Step 1: Getting natural language analysis...");
+      // Step 1: Draft + validate + refine loop
+      onProgress?.({ phase: "analysis_start", message: "Analyzing..." });
       ChainOfThoughtProcessor.progress(
         onProgress,
-        "🔍 Step 1: Getting natural language analysis...",
-      );
-      console.log(
-        "📤 Analysis messages:",
-        JSON.stringify(analysisMessages, null, 2),
+        "🔍 Step 1: Drafting and validating response...",
       );
 
-      onProgress?.({ phase: "analysis_start", message: "Analyzing..." });
+      const baseAnalysisMessages = [
+        { role: "system", content: this.CHAIN_OF_THOUGHT_PROMPT },
+        ...context.slice(-3),
+        { role: "user", content: userMessage },
+      ];
 
-      const analysisResponse = await invoke<{
-        success: boolean;
-        data?: {
-          message: string;
-          model: string;
-          usage: any;
-        };
-        error?: string;
-      }>("cerebras_chat", {
-        messages: analysisMessages,
-        model: "qwen-3-coder-480b",
-        max_tokens: 65536,
-        temperature: 0.1,
-        stream: false,
-      });
+      let naturalResponse = "";
+      let attempt = 1;
+      const maxAttempts = 5;
+      let passed = false;
+      let lastValidatorFeedback: { reasons: string[]; required_changes: string[] } = {
+        reasons: [],
+        required_changes: [],
+      };
 
-      console.log(
-        "📥 Raw analysis response object:",
-        JSON.stringify(analysisResponse, null, 2),
-      );
-
-      if (!analysisResponse.success || !analysisResponse.data?.message) {
-        console.error("❌ Analysis response failed:", analysisResponse);
-        throw new Error(
-          analysisResponse.error || "Failed to get analysis from AI",
+      while (attempt <= maxAttempts && !passed) {
+        const isFirst = attempt === 1;
+        ChainOfThoughtProcessor.progress(
+          onProgress,
+          `🧪 Attempt ${attempt}/${maxAttempts} ${isFirst ? "(draft)" : "(refine)"}`,
         );
+
+        let draftMessages = baseAnalysisMessages;
+        if (!isFirst) {
+          draftMessages = [
+            { role: "system", content: this.REFINER_PROMPT },
+            {
+              role: "user",
+              content: `User request:\n${userMessage}\n\nPrevious draft:\n${naturalResponse}\n\nValidator feedback:\n${JSON.stringify(lastValidatorFeedback)}`,
+            },
+          ];
+        }
+
+        const draftResponse = await invoke<{
+          success: boolean;
+          data?: { message: string; model: string; usage: any };
+          error?: string;
+        }>("cerebras_chat", {
+          messages: draftMessages,
+          model: "qwen-3-coder-480b",
+          max_tokens: 65536,
+          temperature: 0.3,
+          stream: false,
+        });
+
+        if (!draftResponse.success || !draftResponse.data?.message) {
+          console.error("❌ Drafting failed:", draftResponse);
+          throw new Error(draftResponse.error || "Failed to get draft from AI");
+        }
+
+        naturalResponse = draftResponse.data.message.trim();
+        ChainOfThoughtProcessor.progress(onProgress, "✅ Draft produced");
+
+        // Validate the draft
+        const validatorMessages = [
+          { role: "system", content: this.VALIDATOR_PROMPT },
+          {
+            role: "user",
+            content: `User request: ${userMessage}\n\nAssistant draft:\n${naturalResponse}`,
+          },
+        ];
+
+        const validatorResponse = await invoke<{
+          success: boolean;
+          data?: { message: string };
+          error?: string;
+        }>("cerebras_chat", {
+          messages: validatorMessages,
+          model: "qwen-3-coder-480b",
+          max_tokens: 4096,
+          temperature: 0.0,
+          stream: false,
+        });
+
+        if (!validatorResponse.success || !validatorResponse.data?.message) {
+          console.error("❌ Validation failed:", validatorResponse);
+          throw new Error(
+            validatorResponse.error || "Failed to validate assistant draft",
+          );
+        }
+
+        // Parse validator JSON
+        let verdict = "fail";
+        try {
+          const raw = ChainOfThoughtProcessor.sanitizeJsonLike(
+            ChainOfThoughtProcessor.maybeUnwrapQuotedJson(
+              validatorResponse.data.message.trim(),
+            ),
+          );
+          const maybeObjMatch = raw.match(/\{[\s\S]*\}/);
+          const text = maybeObjMatch ? maybeObjMatch[0] : raw;
+          const v = JSON.parse(text);
+          verdict = v.verdict || "fail";
+          lastValidatorFeedback = {
+            reasons: Array.isArray(v.reasons) ? v.reasons : [],
+            required_changes: Array.isArray(v.required_changes)
+              ? v.required_changes
+              : [],
+          };
+        } catch (e) {
+          console.warn("⚠️ Could not parse validator JSON, assuming fail.", e);
+          lastValidatorFeedback = {
+            reasons: [
+              "Validator returned non-JSON or unparsable output; proceed to refine.",
+            ],
+            required_changes: [],
+          };
+          verdict = "fail";
+        }
+
+        if (verdict === "pass") {
+          passed = true;
+          ChainOfThoughtProcessor.progress(onProgress, "✅ Validation passed");
+        } else {
+          ChainOfThoughtProcessor.progress(
+            onProgress,
+            `❌ Validation failed: ${lastValidatorFeedback.reasons.join("; ")}`,
+          );
+          attempt += 1;
+        }
       }
 
-      const naturalResponse = analysisResponse.data.message.trim();
-      console.log("✅ Natural language analysis:", naturalResponse);
-      ChainOfThoughtProcessor.progress(onProgress, "✅ Received analysis");
-      console.log("📏 Response length:", naturalResponse.length);
-      console.log(
-        "🔤 Response char codes (first 50):",
-        naturalResponse
-          .slice(0, 50)
-          .split("")
-          .map((c) => c.charCodeAt(0)),
-      );
-
-      // Stream the chain-of-thought analysis to the UI
+      // Stream only the final accepted/last draft
       await ChainOfThoughtProcessor.streamText(naturalResponse, onProgress);
       onProgress?.({ phase: "analysis_done" });
 
@@ -457,6 +561,8 @@ Return ONLY valid JSON, nothing else.`;
         reasoning: "Two-step processing completed",
         steps: [],
         final_response: parsedResult.final_response,
+        needs_user_path: parsedResult.needs_user_path || false,
+        path_request: parsedResult.path_request || undefined,
         commands_to_execute: parsedResult.commands_to_execute || [],
       };
     } catch (error) {

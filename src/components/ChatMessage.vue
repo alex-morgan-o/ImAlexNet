@@ -132,6 +132,32 @@
                         <span>Apply</span>
                     </button>
 
+                    <!-- Inline folder picker affordance when assistant asks for a path -->
+                    <button
+                        v-if="showsFolderButton"
+                        @click="requestFolderPicker"
+                        class="flex items-center space-x-1 px-2 py-1 text-xs bg-primary-accent text-white rounded-lg hover:bg-primary-accent/90 transition-colors duration-200"
+                        title="Select a folder to grant access"
+                    >
+                        <svg
+                            class="w-3 h-3"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                        >
+                            <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M3 7h4l2 2h10a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"
+                            />
+                        </svg>
+                        <span>{{ buttonLabel }}</span>
+                    </button>
+                    <span v-if="pathGuidance" class="text-xs text-gray-400">{{
+                        pathGuidance
+                    }}</span>
+
                     <button
                         @click="copyMessage(message.content)"
                         class="flex items-center space-x-1 px-1 py-1 text-xs bg-dark-300 text-primary-fg rounded-lg hover:bg-dark-200 transition-colors duration-200"
@@ -166,7 +192,7 @@ const props = defineProps<{
     message: Message;
 }>();
 
-defineEmits(["apply-changes", "regenerate"]);
+const emit = defineEmits(["apply-changes", "regenerate", "request-folder"]);
 
 const logsOpen = ref(false);
 const hasLogs = computed(
@@ -189,6 +215,7 @@ function formatMessage(content: string): string {
     return content
         .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
         .replace(/\*(.*?)\*/g, "<em>$1</em>")
+        .replace(/\n/g, "<br/>")
         .replace(/```[\s\S]*?```/g, (match) => {
             // Handle multi-line code blocks
             const codeContent = match
@@ -229,4 +256,53 @@ async function copyMessage(content: string | undefined) {
         console.error("Failed to copy message:", err);
     }
 }
+
+// Heuristic: detect when assistant is asking for a folder/path
+const asksForPath = computed(() => {
+    if (props.message.role !== "assistant" || !props.message.content)
+        return false;
+    const text = props.message.content.toLowerCase();
+    const keywords = [
+        "provide the exact folder path",
+        "provide the folder path",
+        "provide the path",
+        "folder path",
+        "directory path",
+        "working directory",
+        "path to your project",
+        "select a folder",
+        "choose a folder",
+        "grant access to a folder",
+    ];
+    return keywords.some((k) => text.includes(k));
+});
+
+function requestFolderPicker() {
+    console.log(
+        "[ChatMessage] Select Folder clicked for message:",
+        props.message.id,
+    );
+    emit("request-folder", props.message);
+}
+
+const showsFolderButton = computed(() => {
+    return asksForPath.value || (props.message as any)?.needsUserPath === true;
+});
+
+const pathGuidance = computed(() => {
+    const pr = (props.message as any)?.pathRequest;
+    return pr?.prompt || "";
+});
+
+const buttonLabel = computed(() => {
+    const pr = (props.message as any)?.pathRequest;
+    const access = (pr?.access || "").toString();
+    const suffix = access ? ` (${access.replace("_", "/")})` : "";
+    // Use a more descriptive label if guidance includes 'project'
+    const guidance: string = (pr?.prompt || "").toLowerCase();
+    const base = guidance.includes("project")
+        ? "Select project folder"
+        : "Select folder";
+    return base + suffix;
+});
 </script>

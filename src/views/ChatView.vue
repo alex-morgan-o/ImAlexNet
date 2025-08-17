@@ -1,5 +1,6 @@
 <template>
-    <div class="flex flex-1 overflow-hidden h-full">
+    <div class="relative flex-1 flex flex-col overflow-hidden h-full">
+        <div class="flex flex-1 overflow-hidden h-full">
         <!-- Sidebar -->
         <!-- <Sidebar @select-session="handleSelectSession" /> -->
 
@@ -25,6 +26,7 @@
                     @apply-changes="handleApplyChanges"
                     @regenerate="handleRegenerateMessage"
                     @command-executed="handleCommandExecuted"
+                    @request-folder="handleRequestFolder"
                 />
 
                 <!-- Loading indicator -->
@@ -71,6 +73,24 @@
                 </div>
             </div>
         </div>
+        <!-- Toast Notification -->
+        <div v-if="toast" :class="['toast',
+                             toast.type === 'success' ? 'toast-success' : '',
+                             toast.type === 'error' ? 'toast-error' : '',
+                             toast.type === 'info' ? 'toast-info' : '']">
+            <span>{{ toast.message }}</span>
+        </div>
+        <!-- Close the container started at line 3 -->
+        </div>
+        
+        <PathInputDialog
+            :show="pathInput.show"
+            :value="pathInput.value"
+            :access="pathInput.access || undefined"
+            :prompt="pathInput.prompt || undefined"
+            @cancel="cancelPathInput"
+            @confirm="confirmPathInput"
+        />
     </div>
 </template>
 
@@ -79,6 +99,7 @@ import { ref, onMounted, nextTick, watch } from "vue";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
 import NewSessionPrompt from "../components/NewSessionPrompt.vue";
+import PathInputDialog from "../components/PathInputDialog.vue";
 // import {
 //     CerebrasService,
 //     type ChatMessage as CerebrasMessage,
@@ -95,6 +116,7 @@ import {
     type ChainOfThoughtResult,
 } from "../services/chainOfThoughtProcessor";
 import { fileManager } from "../services/fileManager";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 // Use the FrontendMessage type from session manager (now includes command result)
 type Message = FrontendMessage;
@@ -107,6 +129,20 @@ const messagesContainer = ref<HTMLElement>();
 const currentSession = ref<ChatSession | null>(null);
 const workingDirectory = ref<string | null>(null);
 const showNewSessionPrompt = ref(false);
+
+// Simple toast notifications
+const toast = ref<{ message: string; type: "success" | "error" | "info" } | null>(null);
+let toastTimer: number | null = null;
+function showToast(message: string, type: "success" | "error" | "info" = "info", duration = 2500) {
+    toast.value = { message, type };
+    if (toastTimer) {
+        window.clearTimeout(toastTimer);
+    }
+    toastTimer = window.setTimeout(() => {
+        toast.value = null;
+        toastTimer = null;
+    }, duration);
+}
 
 // Model configuration (removed individual refs since handled in chain of thought processor)
 
@@ -245,11 +281,19 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                 content: thoughtResult.final_response,
                 // @ts-ignore
                 isStreaming: false,
+                // @ts-ignore - flag used by UI to show folder picker
+                needsUserPath: !!thoughtResult.needs_user_path,
+                // @ts-ignore - optional guidance for path request
+                pathRequest: thoughtResult.path_request || undefined,
             } as Message & { isStreaming?: boolean };
         } else {
             aiMessage.content = thoughtResult.final_response;
             // @ts-ignore
             (aiMessage as any).isStreaming = false;
+            // @ts-ignore
+            (aiMessage as any).needsUserPath = !!thoughtResult.needs_user_path;
+            // @ts-ignore
+            (aiMessage as any).pathRequest = thoughtResult.path_request || undefined;
         }
 
         // Save the final AI message
@@ -624,7 +668,162 @@ async function handleSetWorkingDirectory(path: string) {
     } catch {}
 }
 
+// Handle folder selection requests from assistant messages
+async function handleRequestFolder(message: Message) {
+    try {
+        console.log('[ChatView] Handling request-folder for message:', message.id);
+        let selected: string | null = null;
+        try {
+            // Attempt native folder picker via Tauri dialog API with a timeout fallback
+            const timeoutMs = 1500;
+            const openPromise = openDialog({ directory: true, multiple: false }) as Promise<string | string[] | null>;
+            const timeoutPromise = new Promise<null>((resolve) => {
+                setTimeout(() => resolve(null), timeoutMs);
+            });
+            const result = await Promise.race([openPromise, timeoutPromise]);
+            if (Array.isArray(result)) {
+                selected = result[0] || null;
+            } else {
+                selected = (result as string | null) || null;
+            }
+        } catch (e) {
+            console.debug("Tauri dialog not available or blocked; falling back to manual input.");
+            showToast(
+                "Folder picker unavailable. Enter a path manually.",
+                "info",
+            );
+        }
+
+        if (!selected) {
+            // Fallback: open manual input overlay
+            const pr: any = (message as any).pathRequest || {};
+            pathInput.value = {
+                show: true,
+                messageId: message.id,
+                value: workingDirectory.value || "",
+                access: pr.access || null,
+                prompt: pr.prompt || null,
+            };
+            return;
+        }
+
+        if (!selected) {
+            console.log('[ChatView] No folder selected or dialog unavailable. Aborting.');
+            return;
+        }
+
+        // Safety check before applying
+        const isSafe = await fileManager.checkPathSafety(selected);
+        if (!isSafe) {
+            showToast(
+                "Selected path is unsafe or restricted. Choose a folder in your user directories.",
+                "error",
+            );
+            return;
+        }
+
+        await handleSetWorkingDirectory(selected);
+        showToast(`Folder selected: ${selected}`, "success");
+
+        // After setting the working directory, try to continue the original task automatically
+        // Find the user message that this assistant reply responded to (the previous message before it)
+        const idx = messages.value.findIndex((m) => m.id === message.id);
+        let priorUser: Message | undefined;
+        for (let i = idx - 1; i >= 0; i--) {
+            if (messages.value[i].role === "user") {
+                priorUser = messages.value[i];
+                break;
+            }
+        }
+        if (priorUser?.content) {
+            // Retry the user's request, explicitly providing the working directory context
+            const combined = `${priorUser.content}\n\nUse this working directory: ${selected}`;
+            await sendMessage({ text: combined, files: [] });
+        }
+    } catch (err) {
+        console.error("Folder selection failed:", err);
+    }
+}
+
+// Manual path input state (fallback when dialog is blocked)
+const pathInput = ref<{
+    show: boolean;
+    messageId: string | null;
+    value: string;
+    access: string | null;
+    prompt: string | null;
+}>({
+    show: false,
+    messageId: null,
+    value: "",
+    access: null,
+    prompt: null,
+});
+
+async function confirmPathInput(selectedValue?: string) {
+    const selected = (selectedValue ?? pathInput.value.value).trim();
+    if (!selected) {
+        showToast("Please enter a folder path.", "error");
+        return;
+    }
+    const isSafe = await fileManager.checkPathSafety(selected);
+    if (!isSafe) {
+        showToast("Selected path is unsafe or restricted.", "error");
+        return;
+    }
+    await handleSetWorkingDirectory(selected);
+    showToast(`Folder selected: ${selected}`, "success");
+    const msgId = pathInput.value.messageId;
+    pathInput.value = { show: false, messageId: null, value: "", access: null, prompt: null };
+    // Continue original task
+    if (msgId) {
+        const idx = messages.value.findIndex((m) => m.id === msgId);
+        let priorUser: Message | undefined;
+        for (let i = idx - 1; i >= 0; i--) {
+            if (messages.value[i].role === "user") { priorUser = messages.value[i]; break; }
+        }
+        if (priorUser?.content) {
+            const combined = `${priorUser.content}\n\nUse this working directory: ${selected}`;
+            await sendMessage({ text: combined, files: [] });
+        }
+    }
+}
+
+function cancelPathInput() {
+    pathInput.value = { show: false, messageId: null, value: "", access: null, prompt: null };
+}
+
 function dismissNewSessionPrompt() {
     showNewSessionPrompt.value = false;
 }
 </script>
+
+<style scoped>
+.toast {
+    position: fixed;
+    right: 1.25rem; /* 20px */
+    bottom: 1.25rem;
+    z-index: 1000;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.toast-info {
+    background: #2d333b;
+    color: #c9d1d9;
+    border: 1px solid #444c56;
+}
+.toast-success {
+    background: #1b472b;
+    color: #a7f3d0;
+    border: 1px solid #065f46;
+}
+.toast-error {
+    background: #4c1d1d;
+    color: #fecaca;
+    border: 1px solid #7f1d1d;
+}
+</style>
