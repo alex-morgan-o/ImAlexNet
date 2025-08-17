@@ -15,14 +15,14 @@ const envPath = path.resolve(__dirname, "..", ".env");
 dotenv.config({ path: envPath });
 
 class CommandAnalyzer {
-    constructor() {
-        this.client = new Cerebras({
-            apiKey: process.env.CEREBRAS_API_KEY,
-        });
-    }
+  constructor() {
+    this.client = new Cerebras({
+      apiKey: process.env.CEREBRAS_API_KEY,
+    });
+  }
 
-    buildSystemPrompt() {
-        return `You are a shell command analyzer for AlexNet. Analyze user messages to determine if they require executing shell commands.
+  buildSystemPrompt() {
+    return `You are a shell command analyzer for AlexNet. Analyze user messages to determine if they require executing shell commands.
 
 IMPORTANT: Return ONLY a valid JSON response with this exact structure:
 {
@@ -53,109 +53,114 @@ RULES:
 - Be conservative - if unsure, set needsCommand to false
 
 Return only valid JSON, no other text.`;
+  }
+
+  async analyzeMessage(content) {
+    try {
+      const response = await this.client.chat.completions.create({
+        messages: [
+          { role: "system", content: this.buildSystemPrompt() },
+          { role: "user", content: content },
+        ],
+        model: "llama3.1-8b",
+        max_tokens: 8192,
+        temperature: 0.1,
+      });
+
+      const analysisText = response.choices[0]?.message?.content?.trim();
+      if (!analysisText) {
+        throw new Error("No response from AI");
+      }
+
+      // Extract JSON from response
+      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error("No JSON found in response");
+      }
+
+      const analysis = JSON.parse(jsonMatch[0]);
+      return { success: true, analysis };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        details: error,
+      };
     }
-
-    async analyzeMessage(content) {
-        try {
-            const response = await this.client.chat.completions.create({
-                messages: [
-                    { role: 'system', content: this.buildSystemPrompt() },
-                    { role: 'user', content: content }
-                ],
-                model: 'llama3.1-8b',
-                max_tokens: 300,
-                temperature: 0.1
-            });
-
-            const analysisText = response.choices[0]?.message?.content?.trim();
-            if (!analysisText) {
-                throw new Error('No response from AI');
-            }
-
-            // Extract JSON from response
-            const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error('No JSON found in response');
-            }
-
-            const analysis = JSON.parse(jsonMatch[0]);
-            return { success: true, analysis };
-
-        } catch (error) {
-            return {
-                success: false,
-                error: error.message,
-                details: error
-            };
-        }
-    }
+  }
 }
 
 // Test cases
 const testCases = [
-    // Clear command cases
-    "list all files in the current directory",
-    "show me the contents of package.json",
-    "create a new folder called test-dir",
-    "delete the file old-data.txt",
-    "copy README.md to README-backup.md",
-    "write 'Hello World' to greeting.txt",
-    
-    // Ambiguous cases
-    "what files are here?",
-    "I need to see what's in config.json",
-    "make a backup of important.txt",
-    
-    // Non-command cases
-    "what is the weather today?",
-    "how do I learn programming?",
-    "tell me about artificial intelligence",
-    "what's your favorite color?"
+  // Clear command cases
+  "list all files in the current directory",
+  "show me the contents of package.json",
+  "create a new folder called test-dir",
+  "delete the file old-data.txt",
+  "copy README.md to README-backup.md",
+  "write 'Hello World' to greeting.txt",
+
+  // Ambiguous cases
+  "what files are here?",
+  "I need to see what's in config.json",
+  "make a backup of important.txt",
+
+  // Non-command cases
+  "what is the weather today?",
+  "how do I learn programming?",
+  "tell me about artificial intelligence",
+  "what's your favorite color?",
 ];
 
 async function runTests() {
-    const analyzer = new CommandAnalyzer();
-    
-    console.log("🧪 Testing Command Analysis Feature\n");
-    console.log("=" * 60);
+  const analyzer = new CommandAnalyzer();
 
-    for (let i = 0; i < testCases.length; i++) {
-        const testCase = testCases[i];
-        console.log(`\n${i + 1}. Testing: "${testCase}"`);
-        console.log("-".repeat(50));
+  console.log("🧪 Testing Command Analysis Feature\n");
+  console.log("=" * 60);
 
-        const result = await analyzer.analyzeMessage(testCase);
+  for (let i = 0; i < testCases.length; i++) {
+    const testCase = testCases[i];
+    console.log(`\n${i + 1}. Testing: "${testCase}"`);
+    console.log("-".repeat(50));
 
-        if (result.success) {
-            const analysis = result.analysis;
-            console.log(`✅ Analysis successful:`);
-            console.log(`   Needs Command: ${analysis.needsCommand ? '✓' : '✗'}`);
-            if (analysis.needsCommand) {
-                console.log(`   Command: ${analysis.command} ${analysis.args.join(' ')}`);
-            }
-            console.log(`   Explanation: ${analysis.explanation}`);
-            console.log(`   Confidence: ${(analysis.confidence * 100).toFixed(1)}%`);
-            
-            // Color coding based on confidence
-            const confidenceEmoji = analysis.confidence >= 0.8 ? '🟢' : 
-                                  analysis.confidence >= 0.6 ? '🟡' : '🔴';
-            console.log(`   Confidence Level: ${confidenceEmoji}`);
-        } else {
-            console.log(`❌ Analysis failed: ${result.error}`);
-        }
+    const result = await analyzer.analyzeMessage(testCase);
+
+    if (result.success) {
+      const analysis = result.analysis;
+      console.log(`✅ Analysis successful:`);
+      console.log(`   Needs Command: ${analysis.needsCommand ? "✓" : "✗"}`);
+      if (analysis.needsCommand) {
+        console.log(
+          `   Command: ${analysis.command} ${analysis.args.join(" ")}`,
+        );
+      }
+      console.log(`   Explanation: ${analysis.explanation}`);
+      console.log(`   Confidence: ${(analysis.confidence * 100).toFixed(1)}%`);
+
+      // Color coding based on confidence
+      const confidenceEmoji =
+        analysis.confidence >= 0.8
+          ? "🟢"
+          : analysis.confidence >= 0.6
+            ? "🟡"
+            : "🔴";
+      console.log(`   Confidence Level: ${confidenceEmoji}`);
+    } else {
+      console.log(`❌ Analysis failed: ${result.error}`);
     }
+  }
 
-    console.log("\n" + "=" * 60);
-    console.log("🎉 Test run completed!");
-    console.log("\nNext steps:");
-    console.log("- Test the feature in the AlexNet desktop app");
-    console.log("- Try natural language commands in the chat interface");
-    console.log("- Verify permission dialogs appear for command execution");
+  console.log("\n" + "=" * 60);
+  console.log("🎉 Test run completed!");
+  console.log("\nNext steps:");
+  console.log("- Test the feature in the AlexNet desktop app");
+  console.log("- Try natural language commands in the chat interface");
+  console.log("- Verify permission dialogs appear for command execution");
 }
 
 // Run tests if script is called directly
 if (require.main === module) {
-    runTests().catch(console.error);
+  runTests().catch(console.error);
 }
 
 module.exports = CommandAnalyzer;

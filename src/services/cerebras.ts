@@ -43,7 +43,7 @@ export class CerebrasService {
       const response = await invoke<CerebrasResponse>("cerebras_completion", {
         prompt,
         model: options.model || "llama3.1-8b",
-        maxTokens: options.max_tokens || 2024,
+        maxTokens: options.max_tokens || 8192,
         temperature: options.temperature || 0.7,
         stream: options.stream || false,
       });
@@ -65,7 +65,7 @@ export class CerebrasService {
       const response = await invoke<CerebrasResponse>("cerebras_chat", {
         messages,
         model: options.model || "llama3.1-8b",
-        maxTokens: options.max_tokens || 2024,
+        maxTokens: options.max_tokens || 8192,
         temperature: options.temperature || 0.7,
         stream: options.stream || false,
       });

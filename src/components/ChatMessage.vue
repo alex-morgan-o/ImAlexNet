@@ -11,12 +11,42 @@
             <!-- Message content -->
             <div class="min-w-0">
                 <div class="">
+                    <!-- Collapsible Logs -->
+                    <div v-if="hasLogs" class="mt-2">
+                        <button
+                            type="button"
+                            class="text-xs text-gray-400 hover:text-primary-accent transition-colors"
+                            @click="logsOpen = !logsOpen"
+                        >
+                            {{ logsOpen ? "Hide Logs" : "Show Logs" }}
+                        </button>
+                        <div
+                            v-show="logsOpen"
+                            class="mt-2 rounded-lg bg-dark-700 p-3"
+                        >
+                            <pre
+                                class="text-xs text-primary-fg whitespace-pre-wrap"
+                            ><code>{{ (message as any).debugLogs }}</code></pre>
+                            <span
+                                v-if="(message as any).isStreaming"
+                                class="inline-block align-baseline ml-1 w-2 h-4 bg-primary-accent animate-pulse rounded-sm"
+                                aria-hidden="true"
+                            ></span>
+                        </div>
+                    </div>
+
                     <!-- Text content -->
                     <div
                         v-if="message.content"
                         class="prose prose-sm max-w-none"
                     >
                         <div v-html="formatMessage(message.content)"></div>
+                        <!-- Blinking caret while streaming chain-of-thought -->
+                        <span
+                            v-if="(message as any).isStreaming"
+                            class="inline-block align-baseline ml-1 w-2 h-4 bg-primary-accent animate-pulse rounded-sm"
+                            aria-hidden="true"
+                        ></span>
                     </div>
 
                     <!-- Code blocks -->
@@ -127,15 +157,32 @@
 </template>
 
 <script setup lang="ts">
-import type { FrontendMessage } from '../services/sessionManager';
+import { ref, watch, onMounted, computed } from "vue";
+import type { FrontendMessage } from "../services/sessionManager";
 
-type Message = FrontendMessage;
+type Message = FrontendMessage & { debugLogs?: string; isStreaming?: boolean };
 
-defineProps<{
+const props = defineProps<{
     message: Message;
 }>();
 
 defineEmits(["apply-changes", "regenerate"]);
+
+const logsOpen = ref(false);
+const hasLogs = computed(
+    () => !!props.message?.debugLogs && props.message.debugLogs.length > 0,
+);
+
+onMounted(() => {
+    logsOpen.value = !!props.message?.isStreaming || false;
+});
+
+watch(
+    () => props.message?.isStreaming,
+    (val) => {
+        if (val) logsOpen.value = true; // auto-open when streaming starts
+    },
+);
 
 function formatMessage(content: string): string {
     // Enhanced markdown-like formatting with better code block handling
@@ -144,7 +191,9 @@ function formatMessage(content: string): string {
         .replace(/\*(.*?)\*/g, "<em>$1</em>")
         .replace(/```[\s\S]*?```/g, (match) => {
             // Handle multi-line code blocks
-            const codeContent = match.replace(/```(\w+)?\n?/, '').replace(/```$/, '');
+            const codeContent = match
+                .replace(/```(\w+)?\n?/, "")
+                .replace(/```$/, "");
             return `<pre class="bg-dark-700 rounded-lg p-4 mt-2 mb-2 overflow-x-auto"><code class="text-sm font-mono text-primary-fg">${codeContent}</code></pre>`;
         })
         .replace(

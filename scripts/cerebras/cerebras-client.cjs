@@ -105,7 +105,7 @@ class CerebrasClient {
       const {
         messages,
         model = "llama3.1-8b",
-        max_tokens = 2024,
+        max_tokens = 8192,
         temperature = 0.7,
         top_p = 1,
         stop = null,

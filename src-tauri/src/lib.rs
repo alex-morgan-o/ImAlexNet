@@ -1,12 +1,12 @@
-use std::process::Command;
-use std::path::{Path, PathBuf};
-use std::fs;
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 use dirs;
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use uuid::Uuid;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -121,14 +121,14 @@ static BLOCKED_PATHS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 // Security: Check if a path is safe to access
 fn is_path_safe(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
-    
+
     // Check against blocked system paths
     for blocked in BLOCKED_PATHS.iter() {
         if path_str.starts_with(blocked) {
             return false;
         }
     }
-    
+
     // Don't allow access to hidden system files that start with .
     // But allow .alexnet and other user-created hidden files in home directory
     if let Some(home) = dirs::home_dir() {
@@ -142,14 +142,22 @@ fn is_path_safe(path: &Path) -> bool {
             }
         }
     }
-    
+
     // Additional checks for sensitive files
     let sensitive_files = [
-        "passwd", "shadow", "sudoers", "hosts", "fstab",
-        "ssh_config", "sshd_config", "authorized_keys",
-        "id_rsa", "id_ed25519", "id_ecdsa"
+        "passwd",
+        "shadow",
+        "sudoers",
+        "hosts",
+        "fstab",
+        "ssh_config",
+        "sshd_config",
+        "authorized_keys",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
     ];
-    
+
     if let Some(file_name) = path.file_name() {
         let name = file_name.to_string_lossy().to_lowercase();
         for sensitive in &sensitive_files {
@@ -158,14 +166,14 @@ fn is_path_safe(path: &Path) -> bool {
             }
         }
     }
-    
+
     true
 }
 
 // Get safe working directories (user-accessible locations)
 fn get_safe_base_directories() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    
+
     if let Some(home) = dirs::home_dir() {
         dirs.push(home);
     }
@@ -178,7 +186,7 @@ fn get_safe_base_directories() -> Vec<PathBuf> {
     if let Some(desktop) = dirs::desktop_dir() {
         dirs.push(desktop);
     }
-    
+
     dirs
 }
 
@@ -198,7 +206,7 @@ async fn cerebras_completion(
 
     let options = serde_json::json!({
         "model": model.unwrap_or_else(|| "llama3.1-8b".to_string()),
-        "max_tokens": max_tokens.unwrap_or(100),
+        "max_tokens": max_tokens.unwrap_or(8192),
         "temperature": temperature.unwrap_or(0.7),
         "stream": stream.unwrap_or(false)
     });
@@ -217,11 +225,11 @@ async fn cerebras_completion(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Extract JSON from output (skip dotenv debug info)
     let json_start = stdout.find('{').unwrap_or(0);
     let json_content = &stdout[json_start..];
-    
+
     let response: CerebrasResponse = serde_json::from_str(json_content)
         .map_err(|e| format!("Failed to parse cerebras response: {}", e))?;
 
@@ -247,7 +255,7 @@ async fn cerebras_chat(
 
     let options = serde_json::json!({
         "model": model.unwrap_or_else(|| "llama3.1-8b".to_string()),
-        "max_tokens": max_tokens.unwrap_or(100),
+        "max_tokens": max_tokens.unwrap_or(8192),
         "temperature": temperature.unwrap_or(0.7),
         "stream": stream.unwrap_or(false)
     });
@@ -267,9 +275,7 @@ async fn cerebras_chat(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    eprintln!("🔍 Raw cerebras chat stdout: {}", stdout);
-    eprintln!("🔍 Stdout length: {}", stdout.len());
-    
+
     // Extract JSON from output (skip dotenv debug info)
     // Look for the actual JSON response by finding the first occurrence of {"success"
     let json_start = stdout.find("{\"success\"").unwrap_or_else(|| {
@@ -278,22 +284,9 @@ async fn cerebras_chat(
         stdout.find("{\n  \"").unwrap_or(0)
     });
     let json_content = &stdout[json_start..];
-    eprintln!("🎯 Extracted JSON content: {}", json_content);
-    eprintln!("🎯 JSON content length: {}", json_content.len());
-    eprintln!("🔢 First 10 bytes: {:?}", json_content.as_bytes().get(0..10.min(json_content.len())));
-    
+
     let response: CerebrasResponse = serde_json::from_str(json_content)
-        .map_err(|e| {
-            eprintln!("💥 JSON parsing failed: {}", e);
-            eprintln!("💥 Content being parsed: {}", json_content);
-            eprintln!("💥 Content as string (escaped): {:?}", json_content);
-            eprintln!("💥 Content character by character:");
-            for (i, ch) in json_content.chars().enumerate() {
-                eprintln!("  [{}]: '{}' (U+{:04X})", i, ch, ch as u32);
-                if i >= 20 { eprintln!("  ... (showing first 20 chars)"); break; }
-            }
-            format!("Failed to parse cerebras response: {}", e)
-        })?;
+        .map_err(|e| format!("Failed to parse cerebras response: {}", e))?;
 
     Ok(response)
 }
@@ -318,11 +311,11 @@ async fn cerebras_models() -> Result<CerebrasResponse, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Extract JSON from output (skip dotenv debug info)
     let json_start = stdout.find('{').unwrap_or(0);
     let json_content = &stdout[json_start..];
-    
+
     let response: CerebrasResponse = serde_json::from_str(json_content)
         .map_err(|e| format!("Failed to parse cerebras response: {}", e))?;
 
@@ -333,18 +326,20 @@ async fn cerebras_models() -> Result<CerebrasResponse, String> {
 
 #[tauri::command]
 fn get_alexnet_directory() -> Result<String, String> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| "Could not find home directory".to_string())?;
-    
+    let home = dirs::home_dir().ok_or_else(|| "Could not find home directory".to_string())?;
+
     let alexnet_dir = home.join(".alexnet");
-    
+
     // Create directory if it doesn't exist
     if !alexnet_dir.exists() {
         fs::create_dir_all(&alexnet_dir)
             .map_err(|e| format!("Failed to create .alexnet directory: {}", e))?;
     }
-    
-    alexnet_dir.to_string_lossy().to_string().parse()
+
+    alexnet_dir
+        .to_string_lossy()
+        .to_string()
+        .parse()
         .map_err(|e| format!("Invalid directory path: {}", e))
 }
 
@@ -353,7 +348,7 @@ fn generate_session_id(session_name: String) -> Result<String, String> {
     // Generate 10 random characters using UUID and taking first 10 chars
     let uuid = Uuid::new_v4().to_string().replace("-", "");
     let random_chars = &uuid[..10];
-    
+
     // Format: [session-name]-[10-random-characters]
     let session_id = format!("{}-{}", session_name, random_chars);
     Ok(session_id)
@@ -363,13 +358,14 @@ fn generate_session_id(session_name: String) -> Result<String, String> {
 async fn create_chat_session(session_name: String) -> Result<ChatSession, String> {
     let alexnet_dir = get_alexnet_directory()?;
     let session_id = generate_session_id(session_name.clone())?;
-    
+
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
-    
+
     // Create session directory
-    tokio::fs::create_dir_all(&session_dir).await
+    tokio::fs::create_dir_all(&session_dir)
+        .await
         .map_err(|e| format!("Failed to create session directory: {}", e))?;
-    
+
     let session = ChatSession {
         id: session_id.clone(),
         name: session_name,
@@ -383,15 +379,16 @@ async fn create_chat_session(session_name: String) -> Result<ChatSession, String
             tags: vec![],
         },
     };
-    
+
     // Save session to chat.json
     let chat_file = session_dir.join("chat.json");
     let session_json = serde_json::to_string_pretty(&session)
         .map_err(|e| format!("Failed to serialize session: {}", e))?;
-    
-    tokio::fs::write(chat_file, session_json).await
+
+    tokio::fs::write(chat_file, session_json)
+        .await
         .map_err(|e| format!("Failed to write session file: {}", e))?;
-    
+
     Ok(session)
 }
 
@@ -400,22 +397,23 @@ async fn save_chat_message(session_id: String, message: ChatMessage) -> Result<(
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
     let chat_file = session_dir.join("chat.json");
-    
+
     // Load existing session
     let mut session = load_chat_session(session_id.clone()).await?;
-    
+
     // Add new message
     session.messages.push(message);
     session.last_modified = Utc::now();
     session.metadata.total_messages = session.messages.len();
-    
+
     // Save updated session
     let session_json = serde_json::to_string_pretty(&session)
         .map_err(|e| format!("Failed to serialize session: {}", e))?;
-    
-    tokio::fs::write(chat_file, session_json).await
+
+    tokio::fs::write(chat_file, session_json)
+        .await
         .map_err(|e| format!("Failed to write session file: {}", e))?;
-    
+
     Ok(())
 }
 
@@ -424,17 +422,18 @@ async fn load_chat_session(session_id: String) -> Result<ChatSession, String> {
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
     let chat_file = session_dir.join("chat.json");
-    
+
     if !chat_file.exists() {
         return Err(format!("Session '{}' not found", session_id));
     }
-    
-    let session_data = tokio::fs::read_to_string(chat_file).await
+
+    let session_data = tokio::fs::read_to_string(chat_file)
+        .await
         .map_err(|e| format!("Failed to read session file: {}", e))?;
-    
+
     let session: ChatSession = serde_json::from_str(&session_data)
         .map_err(|e| format!("Failed to parse session file: {}", e))?;
-    
+
     Ok(session)
 }
 
@@ -442,30 +441,37 @@ async fn load_chat_session(session_id: String) -> Result<ChatSession, String> {
 async fn list_chat_sessions() -> Result<Vec<SessionListItem>, String> {
     let alexnet_dir = get_alexnet_directory()?;
     let alexnet_path = PathBuf::from(alexnet_dir);
-    
+
     if !alexnet_path.exists() {
         return Ok(vec![]);
     }
-    
+
     let mut sessions = vec![];
-    let mut entries = tokio::fs::read_dir(alexnet_path).await
+    let mut entries = tokio::fs::read_dir(alexnet_path)
+        .await
         .map_err(|e| format!("Failed to read .alexnet directory: {}", e))?;
-    
-    while let Some(entry) = entries.next_entry().await
-        .map_err(|e| format!("Failed to read directory entry: {}", e))? {
-        
-        if entry.file_type().await
-            .map_err(|e| format!("Failed to get file type: {}", e))?.is_dir() {
-            
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to read directory entry: {}", e))?
+    {
+        if entry
+            .file_type()
+            .await
+            .map_err(|e| format!("Failed to get file type: {}", e))?
+            .is_dir()
+        {
             let session_dir = entry.path();
             let chat_file = session_dir.join("chat.json");
-            
+
             if chat_file.exists() {
                 match tokio::fs::read_to_string(chat_file).await {
                     Ok(session_data) => {
                         match serde_json::from_str::<ChatSession>(&session_data) {
                             Ok(session) => {
-                                let preview = session.messages
+                                let preview = session
+                                    .messages
                                     .iter()
                                     .find(|m| m.role == "user")
                                     .and_then(|m| m.content.as_ref())
@@ -476,7 +482,7 @@ async fn list_chat_sessions() -> Result<Vec<SessionListItem>, String> {
                                             content.clone()
                                         }
                                     });
-                                
+
                                 sessions.push(SessionListItem {
                                     id: session.id,
                                     name: session.name,
@@ -494,10 +500,10 @@ async fn list_chat_sessions() -> Result<Vec<SessionListItem>, String> {
             }
         }
     }
-    
+
     // Sort by last modified date (most recent first)
     sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
-    
+
     Ok(sessions)
 }
 
@@ -505,12 +511,13 @@ async fn list_chat_sessions() -> Result<Vec<SessionListItem>, String> {
 async fn delete_chat_session(session_id: String) -> Result<(), String> {
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
-    
+
     if session_dir.exists() {
-        tokio::fs::remove_dir_all(session_dir).await
+        tokio::fs::remove_dir_all(session_dir)
+            .await
             .map_err(|e| format!("Failed to delete session: {}", e))?;
     }
-    
+
     Ok(())
 }
 
@@ -522,7 +529,7 @@ async fn update_session_metadata(
     session_type: Option<String>,
 ) -> Result<(), String> {
     let mut session = load_chat_session(session_id.clone()).await?;
-    
+
     // Update fields if provided
     if let Some(new_name) = name {
         session.name = new_name;
@@ -533,33 +540,35 @@ async fn update_session_metadata(
     if let Some(new_type) = session_type {
         session.metadata.session_type = new_type;
     }
-    
+
     session.last_modified = Utc::now();
-    
+
     // Save updated session
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
     let chat_file = session_dir.join("chat.json");
-    
+
     let session_json = serde_json::to_string_pretty(&session)
         .map_err(|e| format!("Failed to serialize session: {}", e))?;
-    
-    tokio::fs::write(chat_file, session_json).await
+
+    tokio::fs::write(chat_file, session_json)
+        .await
         .map_err(|e| format!("Failed to write session file: {}", e))?;
-    
+
     Ok(())
 }
 
 #[tauri::command]
 async fn export_chat_session(session_id: String, export_path: String) -> Result<(), String> {
     let session = load_chat_session(session_id).await?;
-    
+
     let session_json = serde_json::to_string_pretty(&session)
         .map_err(|e| format!("Failed to serialize session: {}", e))?;
-    
-    tokio::fs::write(export_path, session_json).await
+
+    tokio::fs::write(export_path, session_json)
+        .await
         .map_err(|e| format!("Failed to export session: {}", e))?;
-    
+
     Ok(())
 }
 
@@ -577,14 +586,14 @@ struct ShellCommandResult {
 fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> {
     // Allow only specific safe commands for file operations
     let allowed_commands = [
-        "cat", "ls", "mkdir", "rm", "mv", "cp", "touch", "echo",
-        "head", "tail", "wc", "find", "grep", "sed", "awk", "sh"
+        "cat", "ls", "mkdir", "rm", "mv", "cp", "touch", "echo", "head", "tail", "wc", "find",
+        "grep", "sed", "awk", "sh",
     ];
-    
+
     if !allowed_commands.contains(&command) {
         return Err(format!("Command '{}' is not allowed", command));
     }
-    
+
     // Special handling for sh command - only allow specific patterns
     if command == "sh" {
         if args.len() != 2 || args[0] != "-c" {
@@ -597,17 +606,20 @@ fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> 
         }
         return Ok(()); // Skip further validation for sh -c as we control the format
     }
-    
+
     // Check for dangerous argument patterns
     for arg in args {
         // Allow some redirections for specific commands, but be careful
         let dangerous_chars = [";", "|", "&", "`", "$("];
         for &dangerous in &dangerous_chars {
             if arg.contains(dangerous) {
-                return Err(format!("Dangerous character '{}' detected in arguments", dangerous));
+                return Err(format!(
+                    "Dangerous character '{}' detected in arguments",
+                    dangerous
+                ));
             }
         }
-        
+
         // Validate paths in arguments - be more permissive for relative paths
         if arg.starts_with("/") || arg.starts_with("~") {
             let path = if arg.starts_with("~") {
@@ -619,29 +631,39 @@ fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> 
             } else {
                 PathBuf::from(arg)
             };
-            
+
             if !is_path_safe(&path) {
                 return Err(format!("Path '{}' is not safe", arg));
             }
         }
     }
-    
+
     Ok(())
 }
 
 #[tauri::command]
-async fn execute_shell_command(command: String, args: Vec<String>, working_dir: Option<String>) -> Result<ShellCommandResult, String> {
+async fn execute_shell_command(
+    command: String,
+    args: Vec<String>,
+    working_dir: Option<String>,
+) -> Result<ShellCommandResult, String> {
     // Validate the command and arguments
     validate_shell_command(&command, &args)?;
-    
+
     // Expand user-home shortcuts in args (e.g., ~/Downloads) since we don't run through a shell
     fn expand_user_path(arg: &str) -> String {
         if arg == "~" {
-            if let Some(home) = dirs::home_dir() { return home.to_string_lossy().to_string(); }
+            if let Some(home) = dirs::home_dir() {
+                return home.to_string_lossy().to_string();
+            }
         } else if let Some(rest) = arg.strip_prefix("~/") {
-            if let Some(home) = dirs::home_dir() { return home.join(rest).to_string_lossy().to_string(); }
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest).to_string_lossy().to_string();
+            }
         } else if let Some(rest) = arg.strip_prefix("$HOME/") {
-            if let Some(home) = dirs::home_dir() { return home.join(rest).to_string_lossy().to_string(); }
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest).to_string_lossy().to_string();
+            }
         }
         arg.to_string()
     }
@@ -661,23 +683,24 @@ async fn execute_shell_command(command: String, args: Vec<String>, working_dir: 
         // Default to home directory or first safe directory
         get_safe_base_directories().into_iter().next()
     };
-    
+
     // Execute the command
     let mut cmd = Command::new(&command);
     // Use expanded args to support paths like ~/Downloads without invoking a shell
     cmd.args(&expanded_args);
-    
+
     if let Some(dir) = work_dir {
         cmd.current_dir(dir);
     }
-    
+
     // Set environment variables for safety
     cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin"); // Restrict PATH
     cmd.env_remove("SHELL"); // Remove shell environment for extra safety
-    
-    let output = cmd.output()
+
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to execute command '{}': {}", command, e))?;
-    
+
     Ok(ShellCommandResult {
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -689,7 +712,8 @@ async fn execute_shell_command(command: String, args: Vec<String>, working_dir: 
 #[tauri::command]
 fn get_safe_directories() -> Result<Vec<String>, String> {
     let safe_dirs = get_safe_base_directories();
-    let paths = safe_dirs.into_iter()
+    let paths = safe_dirs
+        .into_iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     Ok(paths)
