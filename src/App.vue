@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import Toolbar from './components/Toolbar.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import { sessionManager } from './services/sessionManager'
+import WorkspacePrompt from './components/WorkspacePrompt.vue'
+import { getWorkspaceStatus, createWorkspace } from './services/workspace'
 
 const router = useRouter()
 const showSettings = ref(false)
 const chatViewRef = ref<any>(null)
+const showWorkspacePrompt = ref(false)
+const workspacePath = ref('~/AlexNet')
 
 async function handleNewSession() {
   try {
@@ -55,6 +59,32 @@ function handleOpenSettings() {
 function handleCloseSettings() {
   showSettings.value = false
 }
+
+onMounted(async () => {
+  try {
+    const status = await getWorkspaceStatus()
+    workspacePath.value = status.path
+    if (!status.exists) {
+      showWorkspacePrompt.value = true
+    }
+  } catch (e) {
+    console.warn('Workspace status check failed:', e)
+  }
+})
+
+async function handleCreateWorkspace() {
+  try {
+    await createWorkspace()
+  } catch (e) {
+    console.error('Failed to create workspace:', e)
+  } finally {
+    showWorkspacePrompt.value = false
+  }
+}
+
+function handleSkipWorkspace() {
+  showWorkspacePrompt.value = false
+}
 </script>
 
 <template>
@@ -76,6 +106,14 @@ function handleCloseSettings() {
     <SettingsPanel
       v-if="showSettings"
       @close="handleCloseSettings"
+    />
+
+    <!-- Workspace Prompt -->
+    <WorkspacePrompt
+      v-if="showWorkspacePrompt"
+      :workspacePath="workspacePath"
+      @create="handleCreateWorkspace"
+      @skip="handleSkipWorkspace"
     />
   </div>
 </template>

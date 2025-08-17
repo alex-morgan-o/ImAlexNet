@@ -2,16 +2,301 @@ use chrono::{DateTime, Utc};
 use dirs;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
+use tauri::Emitter;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// === Tool availability detection ===
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ToolInfo {
+    installed: bool,
+    version: Option<String>,
+    path: Option<String>,
+    last_updated: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ToolAvailability {
+    claude: bool,
+    codex: bool,
+    gemini: bool,
+}
+
+fn command_exists(command: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("where")
+            .arg(command)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {} >/dev/null 2>&1", command))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+fn find_command_path(command: &str) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("where").arg(command).output().ok().and_then(|o| {
+            if o.status.success() {
+                let out = String::from_utf8_lossy(&o.stdout).to_string();
+                out.lines().next().map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {} 2>/dev/null", command))
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    let out = String::from_utf8_lossy(&o.stdout).to_string();
+                    Some(out.trim().to_string())
+                } else {
+                    None
+                }
+            })
+    }
+}
+
+fn get_version_output(cmd: &str, args: &[&str]) -> Option<String> {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let mut out = String::from_utf8_lossy(&o.stdout).to_string();
+                if out.trim().is_empty() {
+                    out = String::from_utf8_lossy(&o.stderr).to_string();
+                }
+                let line = out.lines().next().unwrap_or("").trim().to_string();
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(line)
+                }
+            } else {
+                None
+            }
+        })
+}
+
+struct ToolSpec {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    version_args: &'static [&'static str],
+}
+
+fn collect_tools_snapshot() -> HashMap<String, ToolInfo> {
+    let now = Utc::now();
+    let specs: Vec<ToolSpec> = vec![
+        // Node.js ecosystem
+        ToolSpec { name: "node", aliases: &["node"], version_args: &["--version"] },
+        ToolSpec { name: "npm", aliases: &["npm"], version_args: &["--version"] },
+        ToolSpec { name: "npx", aliases: &["npx"], version_args: &["--version"] },
+        ToolSpec { name: "pnpm", aliases: &["pnpm"], version_args: &["--version"] },
+        ToolSpec { name: "yarn", aliases: &["yarn"], version_args: &["--version"] },
+        ToolSpec { name: "bun", aliases: &["bun"], version_args: &["--version"] },
+        // Python
+        ToolSpec { name: "python", aliases: &["python3", "python"], version_args: &["--version"] },
+        ToolSpec { name: "pip", aliases: &["pip3", "pip"], version_args: &["--version"] },
+        ToolSpec { name: "pipx", aliases: &["pipx"], version_args: &["--version"] },
+        ToolSpec { name: "uv", aliases: &["uv"], version_args: &["--version"] },
+        ToolSpec { name: "poetry", aliases: &["poetry"], version_args: &["--version"] },
+        ToolSpec { name: "conda", aliases: &["conda"], version_args: &["--version"] },
+        // Rust
+        ToolSpec { name: "rustc", aliases: &["rustc"], version_args: &["--version"] },
+        ToolSpec { name: "cargo", aliases: &["cargo"], version_args: &["--version"] },
+        // Go
+        ToolSpec { name: "go", aliases: &["go"], version_args: &["version"] },
+        // .NET
+        ToolSpec { name: "dotnet", aliases: &["dotnet"], version_args: &["--version"] },
+        // Java
+        ToolSpec { name: "java", aliases: &["java"], version_args: &["-version"] },
+        ToolSpec { name: "javac", aliases: &["javac"], version_args: &["-version"] },
+        ToolSpec { name: "mvn", aliases: &["mvn"], version_args: &["-v"] },
+        ToolSpec { name: "gradle", aliases: &["gradle"], version_args: &["-v"] },
+        // Ruby
+        ToolSpec { name: "ruby", aliases: &["ruby"], version_args: &["--version"] },
+        ToolSpec { name: "gem", aliases: &["gem"], version_args: &["--version"] },
+        ToolSpec { name: "bundler", aliases: &["bundler", "bundle"], version_args: &["--version"] },
+        // PHP
+        ToolSpec { name: "php", aliases: &["php"], version_args: &["--version"] },
+        ToolSpec { name: "composer", aliases: &["composer"], version_args: &["--version"] },
+        // Swift
+        ToolSpec { name: "swift", aliases: &["swift"], version_args: &["--version"] },
+        ToolSpec { name: "xcodebuild", aliases: &["xcodebuild"], version_args: &["-version"] },
+        // VCS + tooling
+        ToolSpec { name: "git", aliases: &["git"], version_args: &["--version"] },
+        ToolSpec { name: "gh", aliases: &["gh"], version_args: &["--version"] },
+        ToolSpec { name: "git-lfs", aliases: &["git-lfs"], version_args: &["--version"] },
+        ToolSpec { name: "tsc", aliases: &["tsc"], version_args: &["-v"] },
+        ToolSpec { name: "eslint", aliases: &["eslint"], version_args: &["-v"] },
+        ToolSpec { name: "prettier", aliases: &["prettier"], version_args: &["-v"] },
+        ToolSpec { name: "vite", aliases: &["vite"], version_args: &["--version"] },
+        ToolSpec { name: "webpack", aliases: &["webpack"], version_args: &["--version"] },
+        ToolSpec { name: "rollup", aliases: &["rollup"], version_args: &["--version"] },
+        ToolSpec { name: "parcel", aliases: &["parcel"], version_args: &["--version"] },
+        ToolSpec { name: "jest", aliases: &["jest"], version_args: &["--version"] },
+        ToolSpec { name: "vitest", aliases: &["vitest"], version_args: &["--version"] },
+        ToolSpec { name: "mocha", aliases: &["mocha"], version_args: &["--version"] },
+        ToolSpec { name: "playwright", aliases: &["playwright"], version_args: &["--version"] },
+        ToolSpec { name: "cypress", aliases: &["cypress"], version_args: &["--version"] },
+        // Containers
+        ToolSpec { name: "docker", aliases: &["docker"], version_args: &["--version"] },
+        ToolSpec { name: "docker-compose", aliases: &["docker-compose"], version_args: &["--version"] },
+        // Cloud/AI
+        ToolSpec { name: "openai", aliases: &["openai"], version_args: &["--version"] },
+        ToolSpec { name: "claude", aliases: &["claude"], version_args: &["--version"] },
+        ToolSpec { name: "gcloud", aliases: &["gcloud"], version_args: &["--version"] },
+        ToolSpec { name: "aws", aliases: &["aws"], version_args: &["--version"] },
+        ToolSpec { name: "az", aliases: &["az"], version_args: &["--version"] },
+        ToolSpec { name: "ollama", aliases: &["ollama"], version_args: &["--version"] },
+        ToolSpec { name: "huggingface-cli", aliases: &["huggingface-cli"], version_args: &["--version"] },
+        ToolSpec { name: "codex", aliases: &["codex"], version_args: &["--version"] },
+        ToolSpec { name: "gemini", aliases: &["gemini"], version_args: &["--version"] },
+        // CLI utils
+        ToolSpec { name: "curl", aliases: &["curl"], version_args: &["--version"] },
+        ToolSpec { name: "wget", aliases: &["wget"], version_args: &["--version"] },
+        ToolSpec { name: "jq", aliases: &["jq"], version_args: &["--version"] },
+        ToolSpec { name: "yq", aliases: &["yq"], version_args: &["--version"] },
+        ToolSpec { name: "tar", aliases: &["tar"], version_args: &["--version"] },
+        ToolSpec { name: "unzip", aliases: &["unzip"], version_args: &["-v"] },
+        ToolSpec { name: "zip", aliases: &["zip"], version_args: &["-v"] },
+        // DB clients
+        ToolSpec { name: "sqlite3", aliases: &["sqlite3"], version_args: &["--version"] },
+        ToolSpec { name: "psql", aliases: &["psql"], version_args: &["--version"] },
+        ToolSpec { name: "mysql", aliases: &["mysql"], version_args: &["--version"] },
+        // Package managers
+        ToolSpec { name: "brew", aliases: &["brew"], version_args: &["--version"] },
+    ];
+
+    let mut map: HashMap<String, ToolInfo> = HashMap::new();
+
+    for spec in specs.iter() {
+        let mut found_path: Option<String> = None;
+        let mut version: Option<String> = None;
+        for &alias in spec.aliases.iter() {
+            if let Some(path) = find_command_path(alias) {
+                found_path = Some(path);
+                version = get_version_output(alias, spec.version_args);
+                break;
+            }
+        }
+        let info = ToolInfo {
+            installed: found_path.is_some(),
+            version,
+            path: found_path,
+            last_updated: now,
+        };
+        map.insert(spec.name.to_string(), info);
+    }
+
+    // Special handling for Docker Compose v2 (docker compose)
+    if map
+        .get("docker")
+        .map(|i| i.installed)
+        .unwrap_or(false)
+    {
+        let compose_v2 = Command::new("docker")
+            .args(["compose", "version"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    let mut out = String::from_utf8_lossy(&o.stdout).to_string();
+                    if out.trim().is_empty() {
+                        out = String::from_utf8_lossy(&o.stderr).to_string();
+                    }
+                    let line = out.lines().next().unwrap_or("").trim().to_string();
+                    if line.is_empty() { None } else { Some(line) }
+                } else {
+                    None
+                }
+            });
+        if let Some(v) = compose_v2 {
+            map.insert(
+                "dockerCompose".to_string(),
+                ToolInfo {
+                    installed: true,
+                    version: Some(v),
+                    path: map.get("docker").and_then(|d| d.path.clone()),
+                    last_updated: now,
+                },
+            );
+        }
+    }
+
+    map
+}
+
+fn get_or_create_alexnet_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not find home directory".to_string())?;
+    let alexnet_dir = home.join(".alexnet");
+    if !alexnet_dir.exists() {
+        fs::create_dir_all(&alexnet_dir)
+            .map_err(|e| format!("Failed to create .alexnet directory: {}", e))?;
+    }
+    Ok(alexnet_dir)
+}
+
+fn save_tools_snapshot(snapshot: &HashMap<String, ToolInfo>) -> Result<(), String> {
+    let dir = get_or_create_alexnet_dir()?;
+    let path = dir.join("tools.json");
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| format!("Failed to serialize tools snapshot: {}", e))?;
+    fs::write(path, json)
+        .map_err(|e| format!("Failed to write tools.json: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_tool_availability() -> Result<ToolAvailability, String> {
+    let snapshot = collect_tools_snapshot();
+    // Persist extended snapshot
+    if let Err(e) = save_tools_snapshot(&snapshot) {
+        eprintln!("Failed to persist tool snapshot: {}", e);
+    }
+    // Back-compat: surface primary tools as booleans
+    let availability = ToolAvailability {
+        claude: snapshot.get("claude").map(|t| t.installed).unwrap_or(false),
+        codex: snapshot.get("codex").map(|t| t.installed).unwrap_or(false),
+        gemini: snapshot.get("gemini").map(|t| t.installed).unwrap_or(false),
+    };
+    Ok(availability)
+}
+
+#[tauri::command]
+fn get_tools_snapshot() -> Result<HashMap<String, ToolInfo>, String> {
+    let snapshot = collect_tools_snapshot();
+    if let Err(e) = save_tools_snapshot(&snapshot) {
+        eprintln!("Failed to persist tool snapshot: {}", e);
+    }
+    Ok(snapshot)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -725,13 +1010,102 @@ fn check_path_safety(file_path: String) -> Result<bool, String> {
     Ok(is_path_safe(path))
 }
 
+// Workspace management (~/AlexNet)
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkspaceStatus {
+    path: String,
+    exists: bool,
+}
+
+fn get_workspace_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not find home directory".to_string())?;
+    Ok(home.join("AlexNet"))
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    #[serde(alias = "workspace_path")]
+    workspace_path: Option<String>,
+}
+
+fn settings_path() -> Result<PathBuf, String> {
+    Ok(get_or_create_alexnet_dir()?.join("settings.json"))
+}
+
+fn load_settings() -> Result<AppSettings, String> {
+    let path = settings_path()?;
+    if !path.exists() {
+        return Ok(AppSettings::default());
+    }
+    let data = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read settings.json: {}", e))?;
+    serde_json::from_str::<AppSettings>(&data)
+        .map_err(|e| format!("Failed to parse settings.json: {}", e))
+}
+
+fn save_settings(settings: &AppSettings) -> Result<(), String> {
+    let path = settings_path()?;
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    fs::write(path, json).map_err(|e| format!("Failed to write settings.json: {}", e))
+}
+
+#[tauri::command]
+fn get_workspace_status() -> Result<WorkspaceStatus, String> {
+    let path = get_workspace_path()?;
+    let exists = path.exists();
+    let path_str = path.to_string_lossy().to_string();
+
+    // Keep settings.json updated with workspace path
+    let mut settings = load_settings().unwrap_or_default();
+    if settings.workspace_path.as_deref() != Some(&path_str) {
+        settings.workspace_path = Some(path_str.clone());
+        if let Err(e) = save_settings(&settings) {
+            eprintln!("Failed to update settings.json with workspace path: {}", e);
+        }
+    }
+
+    Ok(WorkspaceStatus { path: path_str, exists })
+}
+
+#[tauri::command]
+fn create_workspace() -> Result<(), String> {
+    let path = get_workspace_path()?;
+    if !path.exists() {
+        fs::create_dir_all(&path).map_err(|e| format!("Failed to create workspace: {}", e))?;
+    }
+    // Persist workspace path in settings.json
+    let mut settings = load_settings().unwrap_or_default();
+    settings.workspace_path = Some(path.to_string_lossy().to_string());
+    save_settings(&settings).ok();
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // On app launch, detect and emit tool availability to the frontend
+            let snapshot = collect_tools_snapshot();
+            let availability = ToolAvailability {
+                claude: snapshot.get("claude").map(|t| t.installed).unwrap_or(false),
+                codex: snapshot.get("codex").map(|t| t.installed).unwrap_or(false),
+                gemini: snapshot.get("gemini").map(|t| t.installed).unwrap_or(false),
+            };
+            let _ = app.emit("tools:availability", availability);
+            // Persist extended snapshot to ~/.alexnet/tools.json at startup
+            if let Err(e) = save_tools_snapshot(&snapshot) {
+                eprintln!("Failed to persist tool snapshot at startup: {}", e);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
+            get_tool_availability,
+            get_tools_snapshot,
             cerebras_completion,
             cerebras_chat,
             cerebras_models,
@@ -746,7 +1120,9 @@ pub fn run() {
             export_chat_session,
             execute_shell_command,
             get_safe_directories,
-            check_path_safety
+            check_path_safety,
+            get_workspace_status,
+            create_workspace
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
