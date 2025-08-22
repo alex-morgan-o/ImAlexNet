@@ -24,6 +24,19 @@
                             v-show="logsOpen"
                             class="mt-2 rounded-lg bg-dark-700 p-3"
                         >
+                            <div class="mb-2 flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    class="text-xs text-gray-400 hover:text-primary-accent transition-colors"
+                                    @click="contextOpen = !contextOpen"
+                                >
+                                    {{ contextOpen ? "Hide Context JSON" : "Show Context JSON" }}
+                                </button>
+                            </div>
+                            <pre
+                                v-if="contextOpen && contextJson"
+                                class="text-xs text-primary-fg whitespace-pre-wrap mb-3 border border-dark-500 rounded p-2 bg-dark-800"
+                            ><code>{{ contextJson }}</code></pre>
                             <pre
                                 class="text-xs text-primary-fg whitespace-pre-wrap"
                             ><code>{{ (message as any).debugLogs }}</code></pre>
@@ -40,13 +53,57 @@
                         v-if="message.content"
                         class="prose prose-sm max-w-none"
                     >
-                        <div v-html="formatMessage(message.content)"></div>
+                        <div v-html="formatMessage(filteredContent)"></div>
                         <!-- Blinking caret while streaming chain-of-thought -->
                         <span
                             v-if="(message as any).isStreaming"
                             class="inline-block align-baseline ml-1 w-2 h-4 bg-primary-accent animate-pulse rounded-sm"
                             aria-hidden="true"
                         ></span>
+                    </div>
+
+                    <!-- Prompt Review Card for local CLI tool runs -->
+                    <div
+                        v-if="showPromptReview"
+                        class="mt-3 border border-dark-500 rounded-lg overflow-hidden"
+                    >
+                        <div
+                            class="px-3 py-2 bg-dark-600 text-xs text-gray-300 flex items-center justify-between"
+                        >
+                            <div>
+                                <span class="opacity-70">Prompt Review</span>
+                                <span v-if="draftTool" class="ml-2 opacity-60">— Tool: {{ draftTool }}</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button
+                                    @click="copyDraft"
+                                    class="text-gray-300 hover:text-primary-accent transition-colors text-xs"
+                                >
+                                    Copy
+                                </button>
+                            </div>
+                        </div>
+                        <div class="p-3 bg-dark-700">
+                            <textarea
+                                v-model="editedPrompt"
+                                class="w-full bg-dark-800 text-primary-fg text-sm p-2 rounded border border-dark-500 focus:outline-none focus:border-primary-accent min-h-[160px]"
+                                spellcheck="false"
+                            />
+                            <div class="mt-2 flex gap-2">
+                                <button
+                                    @click="approveDraft(false)"
+                                    class="px-3 py-1 text-xs bg-primary-success text-white rounded hover:bg-green-600"
+                                >
+                                    Approve
+                                </button>
+                                <button
+                                    @click="approveDraft(true)"
+                                    class="px-3 py-1 text-xs bg-primary-accent text-white rounded hover:bg-primary-accent/90"
+                                >
+                                    Approve with edits
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Code blocks -->
@@ -192,12 +249,27 @@ const props = defineProps<{
     message: Message;
 }>();
 
-const emit = defineEmits(["apply-changes", "regenerate", "request-folder"]);
+const emit = defineEmits([
+    "apply-changes",
+    "regenerate",
+    "request-folder",
+    "approve-draft",
+    "approve-draft-with-edits",
+]);
 
 const logsOpen = ref(false);
+const contextOpen = ref(false);
 const hasLogs = computed(
     () => !!props.message?.debugLogs && props.message.debugLogs.length > 0,
 );
+
+const contextJson = computed(() => {
+    const logs = ((props.message as any)?.debugLogs || "") as string;
+    const marker = "Conversation history JSON:";
+    const idx = logs.indexOf(marker);
+    if (idx === -1) return "";
+    return logs.slice(idx + marker.length).trim();
+});
 
 onMounted(() => {
     logsOpen.value = !!props.message?.isStreaming || false;
@@ -305,4 +377,79 @@ const buttonLabel = computed(() => {
         : "Select folder";
     return base + suffix;
 });
+
+// Prompt review detection and helpers
+const DRAFT_PROMPT_START = "--- AlexNet Drafted CLI Prompt (Tool:";
+const DRAFT_PROMPT_END = "--- End Draft ---";
+
+const showPromptReview = computed(() => {
+    if (props.message.role !== "assistant" || !props.message.content) return false;
+    const c = props.message.content;
+    return c.includes(DRAFT_PROMPT_START) && c.includes(DRAFT_PROMPT_END);
+});
+
+const draftTool = computed(() => {
+    if (!showPromptReview.value || !props.message.content) return "";
+    const content = props.message.content;
+    const headerIdx = content.indexOf(DRAFT_PROMPT_START);
+    if (headerIdx === -1) return "";
+    const headerLine = content.slice(headerIdx).split("\n")[0];
+    const m = headerLine.match(/Tool:\s*(claude|codex|gemini)\)/i);
+    return (m?.[1] || "").toLowerCase();
+});
+
+function extractDraftBody(): string {
+    const content = props.message.content || "";
+    const start = content.indexOf(DRAFT_PROMPT_START);
+    if (start === -1) return "";
+    const headerEnd = content.indexOf("\n", start);
+    if (headerEnd === -1) return "";
+    const end = content.indexOf(DRAFT_PROMPT_END, headerEnd + 1);
+    if (end === -1) return "";
+    return content.slice(headerEnd + 1, end).trim();
+}
+
+const editedPrompt = ref<string>("");
+
+const filteredContent = computed(() => {
+    const content = props.message.content || "";
+    if (!showPromptReview.value) return content;
+    const start = content.indexOf(DRAFT_PROMPT_START);
+    if (start === -1) return content;
+    const endBlockStart = content.indexOf(DRAFT_PROMPT_END, start);
+    if (endBlockStart === -1) return content;
+    const endBlockEnd = endBlockStart + DRAFT_PROMPT_END.length;
+    // Remove from header line start through end marker line
+    const before = content.slice(0, start).trimEnd();
+    const after = content.slice(endBlockEnd).trimStart();
+    const combined = [before, after].filter(Boolean).join("\n\n");
+    return combined || "";
+});
+
+watch(
+    () => props.message.content,
+    () => {
+        if (showPromptReview.value) {
+            editedPrompt.value = extractDraftBody();
+        }
+    },
+    { immediate: true },
+);
+
+function copyDraft() {
+    const text = extractDraftBody();
+    if (text) navigator.clipboard?.writeText(text).catch(() => {});
+}
+
+function approveDraft(withEdits: boolean) {
+    if (withEdits) {
+        emit("approve-draft-with-edits", {
+            messageId: props.message.id,
+            prompt: editedPrompt.value || extractDraftBody(),
+            tool: draftTool.value || undefined,
+        });
+    } else {
+        emit("approve-draft", props.message);
+    }
+}
 </script>

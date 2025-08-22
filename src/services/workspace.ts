@@ -13,3 +13,7 @@ export async function createWorkspace(): Promise<void> {
   await invoke<void>('create_workspace')
 }
 
+export async function setWorkspacePath(path: string): Promise<void> {
+  await invoke<void>('set_workspace_path', { path })
+}
+

@@ -34,7 +34,13 @@ export async function refreshToolAvailability() {
     const result = await invoke<ToolAvailability>('get_tool_availability')
     toolAvailability.value = result
   } catch (err) {
-    console.warn('Failed to refresh tool availability:', err)
+    // Graceful fallback when command is not allowed by capability/permissions
+    const msg = String(err || '')
+    const isNotAllowed = msg.includes('not allowed') || msg.includes('Command not found')
+    if (!isNotAllowed) {
+      console.warn('Failed to refresh tool availability:', err)
+    }
+    // Keep previous values, or default to false
+    toolAvailability.value = toolAvailability.value || { claude: false, codex: false, gemini: false }
   }
 }
-

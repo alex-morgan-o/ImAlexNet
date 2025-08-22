@@ -3,6 +3,11 @@
   "identifier": "default",
   "permissions": [
     "dialog:allow-open",
-    "dialog:default"
-  ]
+    "dialog:default",
+    "core:event:default",
+    "core:event:allow-listen"
+  ],
+  "windows": ["*"],
+  "webviews": ["*"],
+  "urls": ["local"]
 }

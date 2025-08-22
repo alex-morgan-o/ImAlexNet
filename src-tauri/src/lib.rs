@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 use tauri::Emitter;
+use std::sync::{Arc, RwLock};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -276,6 +277,7 @@ fn save_tools_snapshot(snapshot: &HashMap<String, ToolInfo>) -> Result<(), Strin
 
 #[tauri::command]
 fn get_tool_availability() -> Result<ToolAvailability, String> {
+    ensure_allowed("tooling")?;
     let snapshot = collect_tools_snapshot();
     // Persist extended snapshot
     if let Err(e) = save_tools_snapshot(&snapshot) {
@@ -292,6 +294,7 @@ fn get_tool_availability() -> Result<ToolAvailability, String> {
 
 #[tauri::command]
 fn get_tools_snapshot() -> Result<HashMap<String, ToolInfo>, String> {
+    ensure_allowed("tooling")?;
     let snapshot = collect_tools_snapshot();
     if let Err(e) = save_tools_snapshot(&snapshot) {
         eprintln!("Failed to persist tool snapshot: {}", e);
@@ -483,6 +486,7 @@ async fn cerebras_completion(
     temperature: Option<f32>,
     stream: Option<bool>,
 ) -> Result<CerebrasResponse, String> {
+    ensure_allowed("cerebras")?;
     let script_path = std::env::current_dir()
         .map_err(|e| format!("Failed to get current directory: {}", e))?
         .parent()
@@ -529,6 +533,7 @@ async fn cerebras_chat(
     temperature: Option<f32>,
     stream: Option<bool>,
 ) -> Result<CerebrasResponse, String> {
+    ensure_allowed("cerebras")?;
     let script_path = std::env::current_dir()
         .map_err(|e| format!("Failed to get current directory: {}", e))?
         .parent()
@@ -578,6 +583,7 @@ async fn cerebras_chat(
 
 #[tauri::command]
 async fn cerebras_models() -> Result<CerebrasResponse, String> {
+    ensure_allowed("cerebras")?;
     let script_path = std::env::current_dir()
         .map_err(|e| format!("Failed to get current directory: {}", e))?
         .parent()
@@ -641,6 +647,7 @@ fn generate_session_id(session_name: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn create_chat_session(session_name: String) -> Result<ChatSession, String> {
+    ensure_allowed("sessions")?;
     let alexnet_dir = get_alexnet_directory()?;
     let session_id = generate_session_id(session_name.clone())?;
 
@@ -679,6 +686,7 @@ async fn create_chat_session(session_name: String) -> Result<ChatSession, String
 
 #[tauri::command]
 async fn save_chat_message(session_id: String, message: ChatMessage) -> Result<(), String> {
+    ensure_allowed("sessions")?;
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
     let chat_file = session_dir.join("chat.json");
@@ -704,6 +712,7 @@ async fn save_chat_message(session_id: String, message: ChatMessage) -> Result<(
 
 #[tauri::command]
 async fn load_chat_session(session_id: String) -> Result<ChatSession, String> {
+    ensure_allowed("sessions")?;
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
     let chat_file = session_dir.join("chat.json");
@@ -724,6 +733,7 @@ async fn load_chat_session(session_id: String) -> Result<ChatSession, String> {
 
 #[tauri::command]
 async fn list_chat_sessions() -> Result<Vec<SessionListItem>, String> {
+    ensure_allowed("sessions")?;
     let alexnet_dir = get_alexnet_directory()?;
     let alexnet_path = PathBuf::from(alexnet_dir);
 
@@ -794,6 +804,7 @@ async fn list_chat_sessions() -> Result<Vec<SessionListItem>, String> {
 
 #[tauri::command]
 async fn delete_chat_session(session_id: String) -> Result<(), String> {
+    ensure_allowed("sessions")?;
     let alexnet_dir = get_alexnet_directory()?;
     let session_dir = PathBuf::from(alexnet_dir).join(&session_id);
 
@@ -813,6 +824,7 @@ async fn update_session_metadata(
     tags: Option<Vec<String>>,
     session_type: Option<String>,
 ) -> Result<(), String> {
+    ensure_allowed("sessions")?;
     let mut session = load_chat_session(session_id.clone()).await?;
 
     // Update fields if provided
@@ -845,6 +857,7 @@ async fn update_session_metadata(
 
 #[tauri::command]
 async fn export_chat_session(session_id: String, export_path: String) -> Result<(), String> {
+    ensure_allowed("sessions")?;
     let session = load_chat_session(session_id).await?;
 
     let session_json = serde_json::to_string_pretty(&session)
@@ -867,12 +880,93 @@ struct ShellCommandResult {
     exit_code: Option<i32>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ShellExecEvent {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ShellExecChunk {
+    id: String,
+    stream: String, // "stdout" | "stderr"
+    chunk: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ShellExecExit {
+    id: String,
+    success: bool,
+    exit_code: Option<i32>,
+}
+
+// === Runtime permissions (debug toggles) ===
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+struct RuntimePermissions {
+    tooling: bool,
+    shell: bool,
+    sessions: bool,
+    cerebras: bool,
+    workspace: bool,
+}
+
+static RUNTIME_PERMISSIONS: Lazy<Arc<RwLock<RuntimePermissions>>> = Lazy::new(|| {
+    Arc::new(RwLock::new(RuntimePermissions {
+        tooling: true,
+        shell: true,
+        sessions: true,
+        cerebras: true,
+        workspace: true,
+    }))
+});
+
+fn ensure_allowed(group: &str) -> Result<(), String> {
+    let guard = RUNTIME_PERMISSIONS
+        .read()
+        .map_err(|_| "Permission lock poisoned".to_string())?;
+    let allowed = match group {
+        "tooling" => guard.tooling,
+        "shell" => guard.shell,
+        "sessions" => guard.sessions,
+        "cerebras" => guard.cerebras,
+        "workspace" => guard.workspace,
+        _ => true,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!("Runtime permission denied for group: {}", group))
+    }
+}
+
+#[tauri::command]
+fn get_runtime_permissions() -> Result<RuntimePermissions, String> {
+    let guard = RUNTIME_PERMISSIONS
+        .read()
+        .map_err(|_| "Permission lock poisoned".to_string())?;
+    Ok(*guard)
+}
+
+#[tauri::command]
+fn set_runtime_permissions(perms: RuntimePermissions) -> Result<(), String> {
+    let mut guard = RUNTIME_PERMISSIONS
+        .write()
+        .map_err(|_| "Permission lock poisoned".to_string())?;
+    *guard = perms;
+    Ok(())
+}
+
 // Security: Validate shell command arguments to prevent dangerous operations
 fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> {
     // Allow only specific safe commands for file operations
     let allowed_commands = [
+        // file utils
         "cat", "ls", "mkdir", "rm", "mv", "cp", "touch", "echo", "head", "tail", "wc", "find",
         "grep", "sed", "awk", "sh",
+        // local AI CLIs (explicitly allowed)
+        "claude", "codex", "gemini",
     ];
 
     if !allowed_commands.contains(&command) {
@@ -892,33 +986,36 @@ fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> 
         return Ok(()); // Skip further validation for sh -c as we control the format
     }
 
-    // Check for dangerous argument patterns
-    for arg in args {
-        // Allow some redirections for specific commands, but be careful
-        let dangerous_chars = [";", "|", "&", "`", "$("];
-        for &dangerous in &dangerous_chars {
-            if arg.contains(dangerous) {
-                return Err(format!(
-                    "Dangerous character '{}' detected in arguments",
-                    dangerous
-                ));
-            }
-        }
-
-        // Validate paths in arguments - be more permissive for relative paths
-        if arg.starts_with("/") || arg.starts_with("~") {
-            let path = if arg.starts_with("~") {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(&arg[2..]) // Skip "~/"
-                } else {
-                    return Err("Cannot resolve home directory".to_string());
+    // Check for dangerous argument patterns, except for explicitly safe CLIs where we spawn directly
+    let is_safe_cli = matches!(command, "claude" | "codex" | "gemini");
+    if !is_safe_cli {
+        for arg in args {
+            // Allow some redirections for specific commands, but be careful
+            let dangerous_chars = [";", "|", "&", "`", "$("];
+            for &dangerous in &dangerous_chars {
+                if arg.contains(dangerous) {
+                    return Err(format!(
+                        "Dangerous character '{}' detected in arguments",
+                        dangerous
+                    ));
                 }
-            } else {
-                PathBuf::from(arg)
-            };
+            }
 
-            if !is_path_safe(&path) {
-                return Err(format!("Path '{}' is not safe", arg));
+            // Validate paths in arguments - be more permissive for relative paths
+            if arg.starts_with("/") || arg.starts_with("~") {
+                let path = if arg.starts_with("~") {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(&arg[2..]) // Skip "~/"
+                    } else {
+                        return Err("Cannot resolve home directory".to_string());
+                    }
+                } else {
+                    PathBuf::from(arg)
+                };
+
+                if !is_path_safe(&path) {
+                    return Err(format!("Path '{}' is not safe", arg));
+                }
             }
         }
     }
@@ -932,6 +1029,7 @@ async fn execute_shell_command(
     args: Vec<String>,
     working_dir: Option<String>,
 ) -> Result<ShellCommandResult, String> {
+    ensure_allowed("shell")?;
     // Validate the command and arguments
     validate_shell_command(&command, &args)?;
 
@@ -969,8 +1067,35 @@ async fn execute_shell_command(
         get_safe_base_directories().into_iter().next()
     };
 
+    // Resolve explicit path for certain allowed CLIs to avoid PATH issues
+    let mut effective_command = command.clone();
+    if matches!(command.as_str(), "claude" | "codex" | "gemini") {
+        if let Some(found) = find_command_path(&command) {
+            effective_command = found;
+        } else {
+            // Try common install locations
+            if let Some(home) = dirs::home_dir() {
+                let candidates = vec![
+                    std::path::PathBuf::from("/opt/homebrew/bin").join(&command),
+                    std::path::PathBuf::from("/usr/local/bin").join(&command),
+                    home.join(".npm-global/bin").join(&command),
+                    home.join(".local/bin").join(&command),
+                    home.join(".bun/bin").join(&command),
+                    home.join(".volta/bin").join(&command),
+                    home.join(".asdf/shims").join(&command),
+                    home.join(".cargo/bin").join(&command),
+                ];
+                if let Some(path) = candidates.into_iter().find(|p| p.exists()) {
+                    if let Some(s) = path.to_str() {
+                        effective_command = s.to_string();
+                    }
+                }
+            }
+        }
+    }
+
     // Execute the command
-    let mut cmd = Command::new(&command);
+    let mut cmd = Command::new(&effective_command);
     // Use expanded args to support paths like ~/Downloads without invoking a shell
     cmd.args(&expanded_args);
 
@@ -979,7 +1104,51 @@ async fn execute_shell_command(
     }
 
     // Set environment variables for safety
-    cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin"); // Restrict PATH
+    // Build a restricted PATH that also includes common developer bin paths when running safe CLIs
+    fn join_existing_paths(paths: Vec<std::path::PathBuf>) -> String {
+        let mut dedup: Vec<String> = Vec::new();
+        for p in paths {
+            if p.exists() {
+                if let Some(s) = p.to_str() {
+                    if !dedup.iter().any(|x| x == s) {
+                        dedup.push(s.to_string());
+                    }
+                }
+            }
+        }
+        dedup.join(":")
+    }
+
+    let mut path_dirs: Vec<std::path::PathBuf> = vec![
+        "/usr/local/bin".into(),
+        "/usr/bin".into(),
+        "/bin".into(),
+    ];
+    let using_safe_cli = matches!(command.as_str(), "claude" | "codex" | "gemini");
+    if using_safe_cli {
+        // Add common locations for Homebrew and user-level package managers
+        path_dirs.push("/opt/homebrew/bin".into());
+        if let Some(home) = dirs::home_dir() {
+            path_dirs.push(home.join(".npm-global/bin"));
+            path_dirs.push(home.join(".local/bin"));
+            path_dirs.push(home.join(".bun/bin"));
+            path_dirs.push(home.join(".volta/bin"));
+            path_dirs.push(home.join(".asdf/shims"));
+            path_dirs.push(home.join(".cargo/bin"));
+            // Also add Node if discoverable
+            if let Some(node_path) = find_command_path("node") {
+                if let Some(dir) = std::path::Path::new(&node_path).parent() {
+                    path_dirs.push(dir.to_path_buf());
+                }
+            } else {
+                // Common Node locations
+                path_dirs.push("/opt/homebrew/opt/node/bin".into());
+                path_dirs.push("/usr/local/opt/node/bin".into());
+            }
+        }
+    }
+    let final_path = join_existing_paths(path_dirs);
+    cmd.env("PATH", final_path);
     cmd.env_remove("SHELL"); // Remove shell environment for extra safety
 
     let output = cmd
@@ -992,6 +1161,193 @@ async fn execute_shell_command(
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: output.status.code(),
     })
+}
+
+#[tauri::command]
+async fn execute_shell_command_stream(
+    app: tauri::AppHandle,
+    id: String,
+    command: String,
+    args: Vec<String>,
+    working_dir: Option<String>,
+) -> Result<(), String> {
+    ensure_allowed("shell")?;
+    validate_shell_command(&command, &args)?;
+
+    fn expand_user_path(arg: &str) -> String {
+        if arg == "~" {
+            if let Some(home) = dirs::home_dir() {
+                return home.to_string_lossy().to_string();
+            }
+        } else if let Some(rest) = arg.strip_prefix("~/") {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest).to_string_lossy().to_string();
+            }
+        } else if let Some(rest) = arg.strip_prefix("$HOME/") {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest).to_string_lossy().to_string();
+            }
+        }
+        arg.to_string()
+    }
+    let expanded_args: Vec<String> = args.iter().map(|a| expand_user_path(a)).collect();
+
+    let work_dir = if let Some(dir) = working_dir.clone() {
+        let path = PathBuf::from(&dir);
+        if !is_path_safe(&path) {
+            return Err(format!("Working directory '{}' is not safe", dir));
+        }
+        if !path.exists() {
+            return Err(format!("Working directory '{}' does not exist", dir));
+        }
+        Some(path)
+    } else {
+        get_safe_base_directories().into_iter().next()
+    };
+
+    let mut effective_command = command.clone();
+    if matches!(command.as_str(), "claude" | "codex" | "gemini") {
+        if let Some(found) = find_command_path(&command) {
+            effective_command = found;
+        } else if let Some(home) = dirs::home_dir() {
+            let candidates = vec![
+                std::path::PathBuf::from("/opt/homebrew/bin").join(&command),
+                std::path::PathBuf::from("/usr/local/bin").join(&command),
+                home.join(".npm-global/bin").join(&command),
+                home.join(".local/bin").join(&command),
+                home.join(".bun/bin").join(&command),
+                home.join(".volta/bin").join(&command),
+                home.join(".asdf/shims").join(&command),
+                home.join(".cargo/bin").join(&command),
+            ];
+            if let Some(path) = candidates.into_iter().find(|p| p.exists()) {
+                if let Some(s) = path.to_str() {
+                    effective_command = s.to_string();
+                }
+            }
+        }
+    }
+
+    use tokio::process::Command as TokioCommand;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use std::process::Stdio;
+
+    let mut cmd = TokioCommand::new(&effective_command);
+    cmd.args(&expanded_args);
+    if let Some(dir) = work_dir.clone() {
+        cmd.current_dir(dir);
+    }
+
+    fn join_existing_paths(paths: Vec<std::path::PathBuf>) -> String {
+        let mut dedup: Vec<String> = Vec::new();
+        for p in paths {
+            if p.exists() {
+                if let Some(s) = p.to_str() {
+                    if !dedup.iter().any(|x| x == s) {
+                        dedup.push(s.to_string());
+                    }
+                }
+            }
+        }
+        dedup.join(":")
+    }
+    let mut path_dirs: Vec<std::path::PathBuf> = vec![
+        "/usr/local/bin".into(),
+        "/usr/bin".into(),
+        "/bin".into(),
+    ];
+    let using_safe_cli = matches!(command.as_str(), "claude" | "codex" | "gemini");
+    if using_safe_cli {
+        path_dirs.push("/opt/homebrew/bin".into());
+        if let Some(home) = dirs::home_dir() {
+            path_dirs.push(home.join(".npm-global/bin"));
+            path_dirs.push(home.join(".local/bin"));
+            path_dirs.push(home.join(".bun/bin"));
+            path_dirs.push(home.join(".volta/bin"));
+            path_dirs.push(home.join(".asdf/shims"));
+            path_dirs.push(home.join(".cargo/bin"));
+            if let Some(node_path) = find_command_path("node") {
+                if let Some(dir) = std::path::Path::new(&node_path).parent() {
+                    path_dirs.push(dir.to_path_buf());
+                }
+            } else {
+                path_dirs.push("/opt/homebrew/opt/node/bin".into());
+                path_dirs.push("/usr/local/opt/node/bin".into());
+            }
+        }
+    }
+    let final_path = join_existing_paths(path_dirs);
+    cmd.env("PATH", final_path);
+    cmd.env_remove("SHELL");
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn '{}': {}", effective_command, e))?;
+
+    let _ = app.emit(
+        "shell:exec:start",
+        ShellExecEvent {
+            id: id.clone(),
+            command: effective_command.clone(),
+            args: expanded_args.clone(),
+            cwd: working_dir.clone(),
+        },
+    );
+
+    if let Some(stdout) = child.stdout.take() {
+        let app_clone = app.clone();
+        let id_clone = id.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = app_clone.emit(
+                    "shell:exec:stdout",
+                    ShellExecChunk {
+                        id: id_clone.clone(),
+                        stream: "stdout".into(),
+                        chunk: line,
+                    },
+                );
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let app_clone = app.clone();
+        let id_clone = id.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = app_clone.emit(
+                    "shell:exec:stderr",
+                    ShellExecChunk {
+                        id: id_clone.clone(),
+                        stream: "stderr".into(),
+                        chunk: line,
+                    },
+                );
+            }
+        });
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Failed waiting for process: {}", e))?;
+    let success = status.success();
+    let code = status.code();
+    let _ = app.emit(
+        "shell:exec:exit",
+        ShellExecExit {
+            id,
+            success,
+            exit_code: code,
+        },
+    );
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1053,24 +1409,27 @@ fn save_settings(settings: &AppSettings) -> Result<(), String> {
 
 #[tauri::command]
 fn get_workspace_status() -> Result<WorkspaceStatus, String> {
-    let path = get_workspace_path()?;
+    ensure_allowed("workspace")?;
+    
+    // Load settings to check for custom workspace path
+    let settings = load_settings().unwrap_or_default();
+    
+    // Use custom path from settings if available, otherwise use default
+    let path = if let Some(custom_path) = &settings.workspace_path {
+        PathBuf::from(custom_path)
+    } else {
+        get_workspace_path()?
+    };
+    
     let exists = path.exists();
     let path_str = path.to_string_lossy().to_string();
-
-    // Keep settings.json updated with workspace path
-    let mut settings = load_settings().unwrap_or_default();
-    if settings.workspace_path.as_deref() != Some(&path_str) {
-        settings.workspace_path = Some(path_str.clone());
-        if let Err(e) = save_settings(&settings) {
-            eprintln!("Failed to update settings.json with workspace path: {}", e);
-        }
-    }
-
+    
     Ok(WorkspaceStatus { path: path_str, exists })
 }
 
 #[tauri::command]
 fn create_workspace() -> Result<(), String> {
+    ensure_allowed("workspace")?;
     let path = get_workspace_path()?;
     if !path.exists() {
         fs::create_dir_all(&path).map_err(|e| format!("Failed to create workspace: {}", e))?;
@@ -1079,6 +1438,32 @@ fn create_workspace() -> Result<(), String> {
     let mut settings = load_settings().unwrap_or_default();
     settings.workspace_path = Some(path.to_string_lossy().to_string());
     save_settings(&settings).ok();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_workspace_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    ensure_allowed("workspace")?;
+    
+    // Validate the path
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.exists() {
+        return Err("Selected path does not exist".to_string());
+    }
+    if !path_buf.is_dir() {
+        return Err("Selected path is not a directory".to_string());
+    }
+    
+    // Update settings.json with the new workspace path
+    let mut settings = load_settings().unwrap_or_default();
+    settings.workspace_path = Some(path.clone());
+    save_settings(&settings)?;
+    
+    // Emit workspace changed event
+    if let Err(e) = app.emit("workspace:changed", &path) {
+        eprintln!("Failed to emit workspace changed event: {}", e);
+    }
+    
     Ok(())
 }
 
@@ -1104,6 +1489,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            get_runtime_permissions,
+            set_runtime_permissions,
             get_tool_availability,
             get_tools_snapshot,
             cerebras_completion,
@@ -1119,10 +1506,12 @@ pub fn run() {
             update_session_metadata,
             export_chat_session,
             execute_shell_command,
+            execute_shell_command_stream,
             get_safe_directories,
             check_path_safety,
             get_workspace_status,
-            create_workspace
+            create_workspace,
+            set_workspace_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

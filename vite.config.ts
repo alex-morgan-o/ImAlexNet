@@ -29,4 +29,16 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  test: {
+    environment: 'node',
+    globals: true,
+    include: [
+      'src/**/*.test.ts',
+      'src/**/__tests__/**/*.test.ts',
+      'src/**/__tests__/**/*.spec.ts',
+    ],
+    exclude: ['node_modules', 'dist', 'src-tauri'],
+    // Use VM threads to avoid process signals that sandbox may block
+    pool: 'vmThreads',
+  },
 }));

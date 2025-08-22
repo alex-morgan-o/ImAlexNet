@@ -27,6 +27,8 @@
                     @regenerate="handleRegenerateMessage"
                     @command-executed="handleCommandExecuted"
                     @request-folder="handleRequestFolder"
+                    @approve-draft="handleApproveDraft"
+                    @approve-draft-with-edits="handleApproveDraftWithEdits"
                 />
 
                 <!-- Loading indicator -->
@@ -64,6 +66,13 @@
                         @keyup.enter="handleSendMessage"
                     />
                     <button
+                        @click="showSecurity = true"
+                        class="px-3 py-2 bg-dark-400 text-primary-fg rounded-lg"
+                        title="Security & Capabilities"
+                    >
+                        ⚙️
+                    </button>
+                    <button
                         @click="handleSendMessage"
                         :disabled="!inputText.trim()"
                         class="px-4 py-2 bg-primary-accent text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
@@ -72,6 +81,7 @@
                     </button>
                 </div>
             </div>
+            <SecuritySettings v-if="showSecurity" @close="showSecurity = false" />
         </div>
         <!-- Toast Notification -->
         <div v-if="toast" :class="['toast',
@@ -96,10 +106,13 @@
 
 <script setup lang="ts">
 import { ref, onMounted, nextTick, watch } from "vue";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
 import NewSessionPrompt from "../components/NewSessionPrompt.vue";
 import PathInputDialog from "../components/PathInputDialog.vue";
+import SecuritySettings from "../components/SecuritySettings.vue";
 // import {
 //     CerebrasService,
 //     type ChatMessage as CerebrasMessage,
@@ -117,6 +130,7 @@ import {
 } from "../services/chainOfThoughtProcessor";
 import { fileManager } from "../services/fileManager";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getWorkspaceStatus } from "../services/workspace";
 
 // Use the FrontendMessage type from session manager (now includes command result)
 type Message = FrontendMessage;
@@ -128,7 +142,9 @@ const inputRef = ref<HTMLInputElement>();
 const messagesContainer = ref<HTMLElement>();
 const currentSession = ref<ChatSession | null>(null);
 const workingDirectory = ref<string | null>(null);
+const workspacePath = ref<string | null>(null);
 const showNewSessionPrompt = ref(false);
+const showSecurity = ref(false);
 
 // Simple toast notifications
 const toast = ref<{ message: string; type: "success" | "error" | "info" } | null>(null);
@@ -152,6 +168,53 @@ function handleSendMessage() {
         sendMessage({ text, files: [] });
         inputText.value = "";
     }
+}
+
+// Helpers for CLI draft approval flow
+const DRAFT_PROMPT_START = "--- AlexNet Drafted CLI Prompt (Tool:";
+const DRAFT_PROMPT_END = "--- End Draft ---";
+
+function replaceDraftBodyInMessageContent(
+    content: string,
+    newBody: string,
+): string {
+    const start = content.indexOf(DRAFT_PROMPT_START);
+    if (start === -1) return content;
+    const headerEnd = content.indexOf("\n", start);
+    if (headerEnd === -1) return content;
+    const end = content.indexOf(DRAFT_PROMPT_END, headerEnd + 1);
+    if (end === -1) return content;
+    const before = content.slice(0, headerEnd + 1);
+    const after = content.slice(end);
+    return `${before}${(newBody || "").trim()}\n${after}`;
+}
+
+async function handleApproveDraft(_message: Message) {
+    // User wants to run the previously drafted prompt as-is
+    await sendMessage({ text: "approve", files: [] });
+}
+
+async function handleApproveDraftWithEdits(payload: {
+    messageId: string;
+    prompt: string;
+    tool?: string;
+}) {
+    // Update the assistant draft message with the edited prompt, then send approval
+    const idx = messages.value.findIndex((m) => m.id === payload.messageId);
+    if (idx !== -1) {
+        const msg = messages.value[idx];
+        const updated = replaceDraftBodyInMessageContent(
+            msg.content || "",
+            payload.prompt || "",
+        );
+        messages.value[idx] = { ...msg, content: updated };
+        try {
+            await sessionManager.saveMessage(messages.value[idx]);
+        } catch (e) {
+            console.warn("Failed to save edited draft message:", e);
+        }
+    }
+    await sendMessage({ text: "approve", files: [] });
 }
 
 async function sendMessage(messageData: { text: string; files: File[] }) {
@@ -190,16 +253,26 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
         };
         messages.value.push(aiMessage);
 
-        // Get recent messages for context (convert to simple format)
-        const contextMessages = messages.value.slice(-4).map((msg) => ({
-            role: msg.role,
-            content: msg.content || "",
-        }));
+        // Build full conversation history (exclude the just-created AI placeholder)
+        const contextMessages = messages.value
+            .filter((msg) => msg.id !== aiMessage.id)
+            .slice(-12)
+            .map((msg) => ({
+                role: msg.role,
+                content: msg.content || "",
+            }));
 
         // Use chain-of-thought processing with streaming progress
         // Buffer to collect step-by-step logs (and streamed analysis)
         let logsBuffer = "";
 
+        // Debug: Log the options being passed
+        const processorOptions = { 
+            workingDir: workingDirectory.value,
+            workspacePath: workspacePath.value 
+        };
+        console.log('[ChatView] Passing options to chain of thought processor:', processorOptions);
+        
         const thoughtResult: ChainOfThoughtResult =
             await ChainOfThoughtProcessor.processUserMessage(
                 messageData.text,
@@ -271,6 +344,7 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                             messages.value[idx] = { ...(current as any) };
                     }
                 },
+                processorOptions,
             );
 
         // Replace the streaming analysis text with the final response
@@ -327,53 +401,95 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                         c.working_dir || workingDirectory.value || undefined,
                 }),
             );
-            const commandResults =
-                await ChainOfThoughtProcessor.executeCommands(commandsWithWD);
-            console.log("✅ Command execution results:", commandResults);
 
-            // Update the AI message with command results
-            let updatedContent = thoughtResult.final_response;
-
-            for (let i = 0; i < commandResults.length; i++) {
-                const result = commandResults[i];
+            // Stream each command and update the message in real-time
+            for (let i = 0; i < commandsWithWD.length; i++) {
+                const c = commandsWithWD[i];
+                const execId = `${Date.now()}-${i}`;
                 const header =
-                    (result.explanation && result.explanation.trim()) ||
-                    (result.command
-                        ? `Command: ${result.command} ${(result.args || []).join(" ")}`.trim()
-                        : "Command execution");
+                    (c.explanation && c.explanation.trim()) ||
+                    `Command: ${c.command} ${(c.args || []).join(" ")}`.trim();
 
-                updatedContent += `\n\n**${header}**\n`;
-
-                if (result.success) {
-                    const stdout = (result.output || "").trim();
-                    if (stdout) {
-                        updatedContent += `\`\`\`\n${stdout}\n\`\`\``;
-                    } else {
-                        updatedContent += `✅ Completed (no output)`;
-                    }
+                // Append header and open code block for live output
+                let aiIdx = messages.value.findIndex((m) => m.id === aiMessage.id);
+                const prefix = `\n\n**${header}**\n\n$ ${c.command} ${(c.args || []).join(" ")}` +
+                    (c.working_dir ? `\n(wd: ${c.working_dir})` : "") +
+                    `\n\n\`\`\``;
+                if (aiIdx !== -1) {
+                    messages.value[aiIdx].content += prefix;
                 } else {
-                    const errText = (result.error || "Unknown error").trim();
-                    const exitInfo =
-                        typeof result.exit_code === "number"
-                            ? ` (exit ${result.exit_code})`
-                            : "";
-                    updatedContent += `❌ Error${exitInfo}:\n\`\`\`\n${errText}\n\`\`\``;
+                    aiMessage.content += prefix;
                 }
+                await nextTick();
+
+                const unsubs: Array<() => void> = [];
+                const append = (line: string) => {
+                    const idx2 = messages.value.findIndex((m) => m.id === aiMessage.id);
+                    const targ = idx2 !== -1 ? messages.value[idx2] : aiMessage;
+                    targ.content = (targ.content || "") + `\n${line}`;
+                    if (idx2 !== -1) messages.value[idx2] = { ...targ };
+                };
+
+                // Listeners
+                unsubs.push(
+                    await listen<{ id: string; chunk: string }>(
+                        "shell:exec:stdout",
+                        (evt) => {
+                            if ((evt.payload as any)?.id === execId) {
+                                append((evt.payload as any).chunk || "");
+                            }
+                        },
+                    ),
+                );
+                unsubs.push(
+                    await listen<{ id: string; chunk: string }>(
+                        "shell:exec:stderr",
+                        (evt) => {
+                            if ((evt.payload as any)?.id === execId) {
+                                append((evt.payload as any).chunk || "");
+                            }
+                        },
+                    ),
+                );
+
+                // Start
+                await invoke("execute_shell_command_stream", {
+                    id: execId,
+                    command: c.command,
+                    args: c.args,
+                    workingDir: c.working_dir,
+                });
+
+                // Wait for exit
+                const exitPromise = new Promise<{ success: boolean; code?: number }>(
+                    async (resolve) => {
+                        const un = await listen<{ id: string; success: boolean; exit_code?: number }>(
+                            "shell:exec:exit",
+                            (evt) => {
+                                const p: any = evt.payload;
+                                if (p?.id === execId) {
+                                    resolve({ success: !!p.success, code: p.exit_code });
+                                }
+                            },
+                        );
+                        unsubs.push(un);
+                    },
+                );
+                const result = await exitPromise;
+
+                // Close code block and show status
+                append("\n\`\`\`");
+                append(result.success ? "✅ Completed" : `❌ Exit ${result.code ?? ""}`);
+
+                // Cleanup listeners
+                unsubs.forEach((u) => {
+                    try {
+                        u();
+                    } catch (_) {}
+                });
             }
 
-            // Update the message content reactively so Vue re-renders
-            const aiIndex2 = messages.value.findIndex(
-                (m) => m.id === aiMessage.id,
-            );
-            if (aiIndex2 !== -1) {
-                messages.value[aiIndex2] = {
-                    ...messages.value[aiIndex2],
-                    content: updatedContent,
-                };
-            } else {
-                // Fallback (shouldn't happen): mutate the object reference
-                aiMessage.content = updatedContent;
-            }
+            // Content is already updated incrementally above
 
             // Save updated message
             try {
@@ -566,7 +682,32 @@ defineExpose({
     getCurrentSession: () => currentSession.value,
 });
 
+// Load workspace status
+async function loadWorkspaceStatus() {
+    try {
+        const status = await getWorkspaceStatus();
+        workspacePath.value = status.exists ? status.path : null;
+        console.log('[ChatView] Workspace status loaded:', { status, workspacePath: workspacePath.value });
+    } catch (e) {
+        console.warn('Failed to load workspace status:', e);
+        workspacePath.value = null;
+    }
+}
+
 onMounted(async () => {
+    // Load workspace status first
+    await loadWorkspaceStatus();
+    
+    // Listen for workspace changes
+    try {
+        await listen<string>('workspace:changed', (event) => {
+            console.log('[ChatView] Received workspace changed event:', event.payload);
+            workspacePath.value = event.payload;
+        });
+        console.log('[ChatView] Workspace change listener registered');
+    } catch (e) {
+        console.warn('[ChatView] Failed to register workspace change listener:', e);
+    }
     // Check if we should load a specific session from route params or storage
     const sessionId = sessionStorage.getItem("load-session-id");
     if (sessionId) {

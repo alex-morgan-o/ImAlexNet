@@ -22,6 +22,9 @@
                 />
             </div>
 
+            <!-- Workspace Selection -->
+            <WorkspaceSelector @workspace-changed="handleWorkspaceChanged" />
+
             <!-- Available Tools Panel -->
             <div class="w-full max-w-4xl mt-6">
                 <div class="bg-card/70 border border-border rounded-lg p-4 backdrop-blur">
@@ -54,11 +57,6 @@
                             <span class="text-[10px] opacity-70">{{ tool.available ? 'available' : 'missing' }}</span>
                         </div>
                     </div>
-
-                    <div class="mt-4 pt-3 border-t border-border flex items-center gap-2 text-xs text-muted-foreground">
-                        <span class="opacity-80">Workspace:</span>
-                        <code class="text-foreground/90">{{ workspacePath }}</code>
-                    </div>
                 </div>
             </div>
         </div>
@@ -69,6 +67,7 @@
 import { ref, computed, onMounted } from "vue";
 import BlackHoleBackground from "./BlackHoleBackground.vue";
 import ChatInput from "./ChatInput.vue";
+import WorkspaceSelector from "./WorkspaceSelector.vue";
 import { toolAvailability, refreshToolAvailability } from "../services/tooling";
 import { getWorkspaceStatus } from "../services/workspace";
 
@@ -115,5 +114,11 @@ function sendMessage() {
 
     emit("start-chat", message.value.trim());
     message.value = "";
+}
+
+function handleWorkspaceChanged(path: string) {
+    console.log('Workspace changed to:', path);
+    // Update the workspace path display
+    workspacePath.value = path;
 }
 </script>

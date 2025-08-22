@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/2",
+  "identifier": "sessions",
+  "permissions": ["alexnet"],
+  "windows": ["*"],
+  "webviews": ["*"],
+  "urls": ["local"]
+}

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/2",
+  "identifier": "shell",
+  "permissions": ["alexnet", "core:event:default", "core:event:allow-listen"],
+  "windows": ["*"],
+  "webviews": ["*"],
+  "urls": ["local"]
+}

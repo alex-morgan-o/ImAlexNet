@@ -1,0 +1,37 @@
+{
+  "default": null,
+  "permission": [
+    {
+      "identifier": "alexnet",
+      "description": "AlexNet backend commands and features",
+      "commands": {
+        "allow": [
+          "get_tool_availability",
+          "get_tools_snapshot",
+          "cerebras_completion",
+          "cerebras_chat",
+          "cerebras_models",
+          "execute_shell_command",
+          "execute_shell_command_stream",
+          "get_safe_directories",
+          "check_path_safety",
+          "get_alexnet_directory",
+          "generate_session_id",
+          "create_chat_session",
+          "save_chat_message",
+          "load_chat_session",
+          "list_chat_sessions",
+          "delete_chat_session",
+          "update_session_metadata",
+          "export_chat_session",
+          "get_workspace_status",
+          "create_workspace",
+          "get_runtime_permissions",
+          "set_runtime_permissions"
+        ],
+        "deny": []
+      }
+    }
+  ]
+}
+

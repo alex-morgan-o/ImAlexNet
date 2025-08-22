@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { toolAvailability, refreshToolAvailability } from "./tooling";
 
 export interface ChainOfThoughtStep {
   step: number;
@@ -17,6 +18,8 @@ export interface ChainOfThoughtResult {
   reasoning: string;
   steps: ChainOfThoughtStep[];
   final_response: string;
+  intention_analysis?: string;
+  step_plan?: string[];
   needs_user_path?: boolean;
   path_request?: {
     access?: "read" | "write" | "read_write";
@@ -29,6 +32,9 @@ export interface ChainOfThoughtResult {
     explanation: string;
   }>;
   error?: string;
+  // Optional draft prompt review flow (not yet used by UI, carried via content)
+  needs_prompt_review?: boolean;
+  selected_tool?: "claude" | "codex" | "gemini";
 }
 
 export type CoTProgressEvent =
@@ -41,6 +47,150 @@ export type CoTProgressEvent =
   | { phase: "error"; message: string };
 
 export class ChainOfThoughtProcessor {
+  // === CLI prompt review flow markers ===
+  private static readonly DRAFT_PROMPT_START =
+    "--- AlexNet Drafted CLI Prompt (Tool:";
+  private static readonly DRAFT_PROMPT_END = "--- End Draft ---";
+
+  // Heuristic: does this look like a complex, multi-step request?
+  private static isComplexTask(userMessage: string): boolean {
+    const text = (userMessage || "").toLowerCase();
+    const long = text.length > 220 || text.split(/\s+/).length > 40;
+    const keywords = [
+      "implement",
+      "refactor",
+      "architecture",
+      "design",
+      "multi-step",
+      "multi step",
+      "plan",
+      "roadmap",
+      "migrate",
+      "build a",
+      "end-to-end",
+      "end to end",
+      "create a project",
+      "scaffold",
+      "write a spec",
+      "add feature",
+      "improve performance",
+      "benchmark",
+      "debug complex",
+    ];
+    const mentionsFiles =
+      /(src\.|src\-|package\.json|Cargo\.toml|\.ts\b|\.rs\b|\.vue\b|tauri)/i.test(
+        userMessage,
+      );
+    const hasKW = keywords.some((k) => text.includes(k));
+    return long || hasKW || mentionsFiles;
+  }
+
+  private static isApprovalMessage(userMessage: string): boolean {
+    const t = (userMessage || "").trim().toLowerCase();
+    const approvals = [
+      "approve",
+      "ship it",
+      "looks good",
+      "go ahead",
+      "yes, run",
+      "yes run",
+      "run it",
+      "proceed",
+      "execute",
+      "ok run",
+      "okay run",
+      "confirm",
+      "do it",
+    ];
+    if (approvals.includes(t)) return true;
+    // Soft match
+    return /\b(approve|looks good|go ahead|proceed|run it|execute)\b/.test(t);
+  }
+
+  private static selectAvailableTool(): "claude" | "codex" | "gemini" | null {
+    const avail = toolAvailability.value || {
+      claude: false,
+      codex: false,
+      gemini: false,
+    };
+    if (avail.claude) return "claude";
+    if (avail.codex) return "codex";
+    if (avail.gemini) return "gemini";
+    return null;
+  }
+
+  private static buildCliPrompt(
+    tool: "claude" | "codex" | "gemini",
+    userMessage: string,
+    context: Array<{ role: string; content: string }> = [],
+  ): string {
+    const recent = context
+      .slice(-4)
+      .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+      .join("\n\n");
+    const contextJson = JSON.stringify(context || [], null, 2);
+
+    const outputRules = `Output expectations:\n- Propose a concise plan first (steps)\n- Provide exact shell commands when needed\n- If editing files, list target paths and diffs\n- Call out any assumptions or required inputs\n- Avoid destructive actions without explicit confirmation`;
+
+    const toolLine = `Selected tool: ${tool}`;
+
+    return [
+      `Task: ${userMessage}`,
+      toolLine,
+      "Context (most recent messages):",
+      recent || "(no prior context)",
+      "Context (full history JSON):",
+      contextJson,
+      outputRules,
+      "Constraints:\n- Prefer deterministic, reproducible commands\n- Respect user privacy and do not exfiltrate data",
+    ].join("\n\n");
+  }
+
+  private static extractDraftFromContext(
+    context: Array<{ role: string; content: string }>,
+  ): { tool: "claude" | "codex" | "gemini"; prompt: string } | null {
+    const reversed = [...context].reverse();
+    for (const m of reversed) {
+      if (m.role !== "assistant" || !m.content) continue;
+      const startIdx = m.content.indexOf(this.DRAFT_PROMPT_START);
+      const endIdx = m.content.lastIndexOf(this.DRAFT_PROMPT_END);
+      if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+        // Extract tool name from header line
+        const headerLine = m.content
+          .slice(startIdx, Math.min(m.content.length, startIdx + 200))
+          .split("\n")[0];
+        const toolMatch = headerLine.match(/Tool:\s*(claude|codex|gemini)\)/i);
+        const tool = (toolMatch?.[1]?.toLowerCase() || "") as
+          | "claude"
+          | "codex"
+          | "gemini";
+        if (!tool) continue;
+        const prompt = m.content
+          .slice(startIdx)
+          .split("\n")
+          .slice(1) // drop header
+          .join("\n");
+        const body = prompt
+          .slice(0, prompt.indexOf(this.DRAFT_PROMPT_END))
+          .trim();
+        if (body) return { tool, prompt: body };
+      }
+    }
+    return null;
+  }
+
+  private static buildCliExecutionCommand(
+    tool: "claude" | "codex" | "gemini",
+    prompt: string,
+  ): { command: string; args: string[]; explanation: string } {
+    // Call CLI directly with the prompt as a single argument, no shell
+    return {
+      command: tool,
+      args: [prompt],
+      explanation: `Run ${tool} locally with the approved prompt`,
+    };
+  }
+
   // Utility: strip code fences and ANSI/control characters that can break JSON
   private static sanitizeJsonLike(input: string): string {
     let s = input.trim();
@@ -122,44 +272,74 @@ export class ChainOfThoughtProcessor {
     }
     return out;
   }
-  private static readonly CHAIN_OF_THOUGHT_PROMPT = `You are AlexNet, an AI assistant. Analyze the user's request and choose ONE primary action:
+  private static buildIntentionAnalysisPrompt(workspacePath?: string | null): string {
+    console.log('[ChainOfThought] Building intention analysis prompt with workspace:', workspacePath);
+    let basePrompt = `You are AlexNet, an AI assistant. First, analyze the user's intention deeply and create a detailed step-by-step plan.
 
-1) Simple response: If a natural reply suffices, respond conversationally. No commands.
-2) Execute shell: If shell is needed, include clear commands with args and brief explanations. Use safe defaults. Include working_dir when helpful.
-3) Ask for path: If you need to access files/folders and the exact path or permission isn't provided, ask the user for the precise path(s) and required access (read or write). Do NOT invent paths. No commands until path is confirmed.
-4) Search the web: Not supported yet. Inform the user with a concise placeholder and optionally ask a follow-up.
+STEP 1: INTENTION ANALYSIS
+- What is the user trying to accomplish?
+- What is the scope and complexity of their request?
+- What resources or access might be needed?
+- Are there any assumptions or ambiguities to clarify?
 
-Respond naturally first; a separate step will convert it to JSON. In your response, clearly state what you'll do next and, if executing, list the exact commands.
+STEP 2: DETAILED PLANNING
+Break down the task into specific, actionable steps. For each step, identify:
+- What needs to be done
+- What resources/access are required
+- What commands or actions are needed
+- Dependencies between steps
 
-Tell me:
-- What to say to the user
-- Any commands needed (command name, arguments, optional working_dir, and a short explanation)
+STEP 3: RESOURCE REQUIREMENTS
+If file system access is needed:
+- Specify exactly what files/folders need to be accessed
+- Indicate whether read, write, or both permissions are needed
+- Explain why this access is necessary for the task`;
+
+    if (workspacePath) {
+      basePrompt += `
+
+IMPORTANT: The user has set their workspace to: ${workspacePath}
+You have access to this workspace and can work with files and folders within it. Use this workspace for any file operations unless the user specifically requests a different location.`;
+    }
+
+    basePrompt += `
+
+Respond with your analysis and plan in natural language. Be thorough but concise.
 
 Examples:
 
-User: "Hello"
-Response: Hi! How can I help today? No commands needed.
+User: "Help me refactor my Vue components"
+Analysis: The user wants to improve their Vue.js codebase structure. This requires:
+1. Analyzing existing component structure
+2. Identifying refactoring opportunities  
+3. Planning the refactoring approach
+4. Implementing the changes
 
-User: "List files in my Downloads"
-Response: I'll list your Downloads folder. Need to run: ls -la ~/Downloads to show detailed file listing.
+Plan:
+Step 1: I need to examine your Vue components to understand current structure
+Step 2: Analyze component dependencies and patterns
+Step 3: Propose refactoring strategy
+Step 4: Implement the refactoring changes
 
-User: "Find all TODOs in my project"
-Response: To help with that, please provide the exact folder path to your project (read access), e.g., /Users/you/path/to/project.
+Resource needs: I'll need read/write access to your project folder to examine and modify Vue component files.
 
-User: "Search the web for the latest Vue 3 docs"
-Response: Web search is not supported yet. Would you like me to help using any local docs or previously saved notes instead?
+User: "What's the weather like?"
+Analysis: The user wants weather information. This is a simple informational request that doesn't require file access or complex planning.
 
-User: "Create a file called test.txt with hello world"
-Response: I'll create that file. Need to run: sh -c "echo 'hello world' > test.txt" to create the file with the content.
+Plan: Provide a direct response about weather information limitations.
 
-Be natural, concise, and never fabricate file paths.`;
+Resource needs: None - this is a conversational response.`;
+    return basePrompt;
+  }
 
-  private static readonly JSON_FORMATTER_PROMPT = `You are a JSON formatter. Convert the natural language response into this exact JSON format:
+  private static readonly JSON_FORMATTER_PROMPT = `You are a JSON formatter. Convert the intention analysis and plan into this exact JSON format:
 
 {
+    "intention_analysis": "detailed analysis of user's intention",
+    "step_plan": ["step 1 description", "step 2 description", ...],
     "final_response": "response to user",
     "needs_user_path": false,
-    "path_request": { "access": "read" | "write" | "read_write", "prompt": "optional guidance to user" },
+    "path_request": { "access": "read" | "write" | "read_write", "prompt": "guidance for folder/file selection" },
     "commands_to_execute": [
         {
             "command": "command_name",
@@ -171,9 +351,13 @@ Be natural, concise, and never fabricate file paths.`;
 }
 
 Rules:
-- If the analysis asks the user for a file/folder path or permission, set "needs_user_path": true, include a concise guidance string in "path_request.prompt" and the requested access level in "path_request.access" (read/write/read_write). Also set "commands_to_execute" to [] and put the question in "final_response". Do not invent paths.
-- If the analysis indicates a web search, set "final_response" to a concise notice like "Web search is not supported yet." (optionally include a follow-up question). Set "commands_to_execute" to [].
-- If there are commands, include exact command and args. Use an empty array when there are none.
+- Extract intention analysis into "intention_analysis" field
+- Break down the plan into discrete steps in "step_plan" array
+- If file system access is needed, set "needs_user_path": true and provide clear guidance in "path_request.prompt" for UI folder/file selection
+- Set "path_request.access" to the required permission level (read/write/read_write)
+- If no file access needed, set "needs_user_path": false
+- Include all planned commands in "commands_to_execute" or empty array if none
+- Web search requests should set appropriate final_response and empty commands array
 
 Return ONLY valid JSON, nothing else.`;
 
@@ -231,8 +415,78 @@ Return ONLY the improved natural language reply.`;
     userMessage: string,
     context: Array<{ role: string; content: string }> = [],
     onProgress?: (event: CoTProgressEvent) => void,
+    opts?: { workingDir?: string | null; workspacePath?: string | null },
   ): Promise<ChainOfThoughtResult> {
+    console.log('[ChainOfThought] Processing user message with options:', opts);
     try {
+      // First, make tool availability up-to-date (best-effort)
+      try {
+        await refreshToolAvailability();
+      } catch (_) {}
+
+      // 0) If the user is approving a previously drafted CLI prompt, execute it
+      const priorDraft =
+        ChainOfThoughtProcessor.extractDraftFromContext(context);
+      if (
+        priorDraft &&
+        ChainOfThoughtProcessor.isApprovalMessage(userMessage)
+      ) {
+        const cmd = ChainOfThoughtProcessor.buildCliExecutionCommand(
+          priorDraft.tool,
+          priorDraft.prompt,
+        );
+        const toolName = priorDraft.tool;
+        const msg = `Running ${toolName} with your approved prompt...`;
+        return {
+          success: true,
+          reasoning: "Approved prompt – executing local CLI tool",
+          steps: [],
+          final_response: msg,
+          commands_to_execute: [cmd],
+          selected_tool: toolName,
+        };
+      }
+
+      // 1) For complex tasks, draft a CLI prompt and ask for review
+      const tool = ChainOfThoughtProcessor.selectAvailableTool();
+      const complex = ChainOfThoughtProcessor.isComplexTask(userMessage);
+      if (complex && tool) {
+        const draft = ChainOfThoughtProcessor.buildCliPrompt(
+          tool,
+          userMessage,
+          context,
+        );
+        const reviewMessage = [
+          `${ChainOfThoughtProcessor.DRAFT_PROMPT_START} ${tool}) ---`,
+          draft,
+          ChainOfThoughtProcessor.DRAFT_PROMPT_END,
+          "\n",
+          "Please review this prompt for the local tool.",
+          "Reply with 'approve' to run as-is, or reply with edits.",
+        ].join("\n");
+
+        // Stream the draft for a nicer UX
+        onProgress?.({
+          phase: "analysis_start",
+          message: "Drafting local CLI prompt...",
+        });
+        await ChainOfThoughtProcessor.streamText(reviewMessage, onProgress, {
+          chunkSize: 48,
+          delayMs: 10,
+        });
+        onProgress?.({ phase: "analysis_done" });
+
+        return {
+          success: true,
+          reasoning: "Drafted CLI prompt for complex task; awaiting approval",
+          steps: [],
+          final_response: reviewMessage,
+          needs_prompt_review: true,
+          selected_tool: tool,
+          commands_to_execute: [],
+        };
+      }
+
       // Step 1: Draft + validate + refine loop
       onProgress?.({ phase: "analysis_start", message: "Analyzing..." });
       ChainOfThoughtProcessor.progress(
@@ -240,17 +494,63 @@ Return ONLY the improved natural language reply.`;
         "🔍 Step 1: Drafting and validating response...",
       );
 
+      const contextJsonMsg = {
+        role: "system" as const,
+        content:
+          "Conversation history JSON:\n" +
+          JSON.stringify(context || [], null, 2),
+      };
+
+      // Try to infer a working directory from opts or context text
+      let workingDir = opts?.workingDir || null;
+      if (!workingDir && context && context.length) {
+        try {
+          const joined = context.map((m) => m.content || "").join("\n\n");
+          const m1 = joined.match(/Working directory set to:\s*(\S+)/i);
+          const m2 = joined.match(/Use this working directory:\s*(\S+)/i);
+          workingDir = (m1?.[1] || m2?.[1] || null) as string | null;
+        } catch (_) {}
+      }
+
+      // Enhance user message with workspace context if available
+      let enhancedUserMessage = userMessage;
+      if (opts?.workspacePath) {
+        enhancedUserMessage = `[Workspace: ${opts.workspacePath}]\n\n${userMessage}`;
+        console.log('[ChainOfThought] Enhanced user message with workspace context:', enhancedUserMessage);
+      }
+
       const baseAnalysisMessages = [
-        { role: "system", content: this.CHAIN_OF_THOUGHT_PROMPT },
-        ...context.slice(-3),
-        { role: "user", content: userMessage },
+        { role: "system", content: this.buildIntentionAnalysisPrompt(opts?.workspacePath) },
+        ...(workingDir
+          ? [
+              {
+                role: "system" as const,
+                content: `Context: You already have access to the user's working directory: ${workingDir}. Do not ask for the path again; proceed with analysis and include concrete commands when needed. If the task is complex, outline a short TODO plan and start with step 1.`,
+              },
+            ]
+          : []),
+        contextJsonMsg,
+        ...context, // do not re-truncate here; caller already limits
+        { role: "user", content: enhancedUserMessage },
       ];
+
+      // Emit the full context JSON into logs for debugging/visibility
+      try {
+        ChainOfThoughtProcessor.progress(
+          onProgress,
+          "Conversation history JSON:\n" +
+            JSON.stringify(context || [], null, 2),
+        );
+      } catch (_) {}
 
       let naturalResponse = "";
       let attempt = 1;
       const maxAttempts = 5;
       let passed = false;
-      let lastValidatorFeedback: { reasons: string[]; required_changes: string[] } = {
+      let lastValidatorFeedback: {
+        reasons: string[];
+        required_changes: string[];
+      } = {
         reasons: [],
         required_changes: [],
       };
@@ -372,6 +672,22 @@ Return ONLY the improved natural language reply.`;
           role: "system",
           content: this.JSON_FORMATTER_PROMPT,
         },
+        ...(workingDir
+          ? [
+              {
+                role: "system" as const,
+                content: `Additional rule: The working directory is already confirmed (${workingDir}). Do NOT set needs_user_path or ask for path. Proceed with commands if appropriate.`,
+              },
+            ]
+          : []),
+        ...(opts?.workspacePath
+          ? [
+              {
+                role: "system" as const,
+                content: `Additional context: The user has workspace set to ${opts.workspacePath}. Consider this when determining if file access is needed.`,
+              },
+            ]
+          : []),
         {
           role: "user",
           content: `Convert this analysis to JSON:\n\n${naturalResponse}`,
@@ -561,6 +877,8 @@ Return ONLY the improved natural language reply.`;
         reasoning: "Two-step processing completed",
         steps: [],
         final_response: parsedResult.final_response,
+        intention_analysis: parsedResult.intention_analysis,
+        step_plan: parsedResult.step_plan || [],
         needs_user_path: parsedResult.needs_user_path || false,
         path_request: parsedResult.path_request || undefined,
         commands_to_execute: parsedResult.commands_to_execute || [],
