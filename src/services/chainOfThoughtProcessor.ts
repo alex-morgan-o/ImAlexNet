@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getAgentManager } from './agents/agentManager';
+import { AgentResponse } from './agents/types';
 
 export interface ChainOfThoughtStep {
   step: number;
@@ -229,7 +231,64 @@ Return ONLY the improved natural language reply.`;
 
   static async processUserMessage(
     userMessage: string,
-    context: Array<{ role: string; content: string }> = [],
+    context: Array<{ role: string; content: string; timestamp?: string; files?: any[]; commandResult?: any; }> = [],
+    onProgress?: (event: CoTProgressEvent) => void,
+  ): Promise<ChainOfThoughtResult> {
+    // Use new agent system by default, fall back to legacy if needed
+    try {
+      return await ChainOfThoughtProcessor.processWithAgentSystem(userMessage, context, onProgress);
+    } catch (agentError) {
+      console.warn('[ChainOfThoughtProcessor] Agent system failed, falling back to legacy processor:', agentError);
+      onProgress?.({ phase: "log", text: "⚠️ Using fallback processing..." });
+      return await ChainOfThoughtProcessor.processWithLegacySystem(userMessage, context, onProgress);
+    }
+  }
+
+  static async processWithAgentSystem(
+    userMessage: string,
+    context: Array<{ role: string; content: string; timestamp?: string; files?: any[]; commandResult?: any; }> = [],
+    onProgress?: (event: CoTProgressEvent) => void,
+  ): Promise<ChainOfThoughtResult> {
+    try {
+      onProgress?.({ phase: "analysis_start", message: "Initializing agent system..." });
+      
+      const agentManager = getAgentManager();
+      await agentManager.initialize();
+      
+      onProgress?.({ phase: "log", text: "🤖 Using multi-agent orchestration..." });
+
+      // Extract workspace information from context if available
+      const workspaceState = {
+        workingDirectory: undefined as string | undefined,
+        availableTools: ['file-operations', 'command-execution', 'analysis'],
+        currentSession: undefined as any
+      };
+
+      const agentResponse: AgentResponse = await agentManager.processUserInput(
+        userMessage,
+        context,
+        workspaceState,
+        onProgress
+      );
+
+      onProgress?.({ phase: "format_done" });
+
+      if (!agentResponse.success) {
+        throw new Error(agentResponse.error || 'Agent processing failed');
+      }
+
+      // Convert agent response to legacy format
+      return ChainOfThoughtProcessor.convertAgentResponseToLegacyFormat(agentResponse, userMessage);
+
+    } catch (error) {
+      console.error('[ChainOfThoughtProcessor] Agent system processing failed:', error);
+      throw error; // Re-throw to trigger fallback
+    }
+  }
+
+  static async processWithLegacySystem(
+    userMessage: string,
+    context: Array<{ role: string; content: string; timestamp?: string; files?: any[]; commandResult?: any; }> = [],
     onProgress?: (event: CoTProgressEvent) => void,
   ): Promise<ChainOfThoughtResult> {
     try {
@@ -598,6 +657,51 @@ Return ONLY the improved natural language reply.`;
         error: error instanceof Error ? error.message : "Unknown error",
       };
     }
+  }
+
+  static convertAgentResponseToLegacyFormat(agentResponse: AgentResponse, _userMessage: string): ChainOfThoughtResult {
+    const result = agentResponse.result;
+    
+    // If result is already in the expected format, use it directly
+    if (result && typeof result === 'object' && result.final_response) {
+      return {
+        success: agentResponse.success,
+        reasoning: agentResponse.thoughts || 'Multi-agent processing completed',
+        steps: [], // Legacy steps not used in agent system
+        final_response: result.final_response,
+        needs_user_path: result.needs_user_path || false,
+        path_request: result.path_request,
+        commands_to_execute: result.commands_to_execute || [],
+        error: agentResponse.error
+      };
+    }
+
+    // If result has execution result format, convert it
+    if (result && result.finalResponse) {
+      return {
+        success: agentResponse.success,
+        reasoning: agentResponse.thoughts || 'Multi-agent processing completed',
+        steps: [],
+        final_response: result.finalResponse,
+        needs_user_path: result.needsUserPath || false,
+        path_request: result.pathRequest,
+        commands_to_execute: result.commands || [],
+        error: agentResponse.error
+      };
+    }
+
+    // Fallback: create basic response
+    return {
+      success: agentResponse.success,
+      reasoning: agentResponse.thoughts || 'Multi-agent processing completed',
+      steps: [],
+      final_response: agentResponse.success 
+        ? (typeof result === 'string' ? result : JSON.stringify(result))
+        : `I encountered an issue processing your request: ${agentResponse.error || 'Unknown error'}`,
+      needs_user_path: false,
+      commands_to_execute: [],
+      error: agentResponse.error
+    };
   }
 
   static async executeCommands(
