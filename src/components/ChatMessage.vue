@@ -30,13 +30,33 @@
                                     class="text-xs text-gray-400 hover:text-primary-accent transition-colors"
                                     @click="contextOpen = !contextOpen"
                                 >
-                                    {{ contextOpen ? "Hide Context JSON" : "Show Context JSON" }}
+                                    {{ contextOpen ? "Hide Context" : `Show Context (${contextMessageCount} messages)` }}
                                 </button>
                             </div>
-                            <pre
-                                v-if="contextOpen && contextJson"
-                                class="text-xs text-primary-fg whitespace-pre-wrap mb-3 border border-dark-500 rounded p-2 bg-dark-800"
-                            ><code>{{ contextJson }}</code></pre>
+                            <div
+                                v-if="contextOpen && (contextJson || props.context)"
+                                class="text-xs text-primary-fg mb-3 border border-dark-500 rounded p-2 bg-dark-800"
+                            >
+                                <!-- Pretty formatted context display -->
+                                <div v-if="props.context && props.context.length > 0" class="space-y-2">
+                                    <div
+                                        v-for="(ctx, idx) in props.context"
+                                        :key="idx"
+                                        class="border-l-2 pl-2"
+                                        :class="ctx.role === 'user' ? 'border-blue-400' : 'border-green-400'"
+                                    >
+                                        <div class="font-medium text-gray-300">
+                                            {{ ctx.role === 'user' ? 'User' : 'Assistant' }}
+                                            <span v-if="ctx.timestamp" class="text-gray-500 font-normal ml-2">
+                                                {{ formatTime(ctx.timestamp) }}
+                                            </span>
+                                        </div>
+                                        <div class="text-gray-400 mt-1 whitespace-pre-wrap">{{ (ctx.content || '').slice(0, 200) }}{{ (ctx.content || '').length > 200 ? '...' : '' }}</div>
+                                    </div>
+                                </div>
+                                <!-- Fallback raw JSON display -->
+                                <pre v-else-if="contextJson" class="whitespace-pre-wrap"><code>{{ contextJson }}</code></pre>
+                            </div>
                             <pre
                                 class="text-xs text-primary-fg whitespace-pre-wrap"
                             ><code>{{ (message as any).debugLogs }}</code></pre>
@@ -247,6 +267,7 @@ type Message = FrontendMessage & { debugLogs?: string; isStreaming?: boolean };
 
 const props = defineProps<{
     message: Message;
+    context?: Array<{ role: string; content: string; timestamp?: Date }>;
 }>();
 
 const emit = defineEmits([
@@ -264,11 +285,35 @@ const hasLogs = computed(
 );
 
 const contextJson = computed(() => {
+    // First try to use the passed context prop
+    if (props.context && props.context.length > 0) {
+        return JSON.stringify(props.context, null, 2);
+    }
+    
+    // Fallback to extracting from debug logs (for backward compatibility)
     const logs = ((props.message as any)?.debugLogs || "") as string;
     const marker = "Conversation history JSON:";
     const idx = logs.indexOf(marker);
     if (idx === -1) return "";
     return logs.slice(idx + marker.length).trim();
+});
+
+const contextMessageCount = computed(() => {
+    if (props.context && props.context.length > 0) {
+        return props.context.length;
+    }
+    
+    // Try to count from debug logs as fallback
+    const json = contextJson.value;
+    if (json) {
+        try {
+            const parsed = JSON.parse(json);
+            return Array.isArray(parsed) ? parsed.length : 0;
+        } catch {
+            return 0;
+        }
+    }
+    return 0;
 });
 
 onMounted(() => {

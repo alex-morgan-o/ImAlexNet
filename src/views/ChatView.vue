@@ -20,9 +20,10 @@
                 class="flex-1 overflow-y-auto p-4 space-y-4 min-h-0"
             >
                 <ChatMessage
-                    v-for="message in messages"
+                    v-for="(message, index) in messages"
                     :key="message.id"
                     :message="message"
+                    :context="getContextForMessage(index)"
                     @apply-changes="handleApplyChanges"
                     @regenerate="handleRegenerateMessage"
                     @command-executed="handleCommandExecuted"
@@ -936,6 +937,17 @@ function cancelPathInput() {
 
 function dismissNewSessionPrompt() {
     showNewSessionPrompt.value = false;
+}
+
+// Get context messages for a specific message (all previous messages)
+function getContextForMessage(messageIndex: number) {
+    return messages.value
+        .slice(0, messageIndex)
+        .map((msg) => ({
+            role: msg.role,
+            content: msg.content || "",
+            timestamp: msg.timestamp
+        }));
 }
 </script>
 

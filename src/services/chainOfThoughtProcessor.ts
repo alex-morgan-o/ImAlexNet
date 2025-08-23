@@ -299,7 +299,7 @@ If file system access is needed:
       basePrompt += `
 
 IMPORTANT: The user has set their workspace to: ${workspacePath}
-You have access to this workspace and can work with files and folders within it. Use this workspace for any file operations unless the user specifically requests a different location.`;
+You have FULL ACCESS to this workspace. DO NOT ask for paths or folder selection. Use this workspace directly for all file operations. Set working directories to "${workspacePath}" in your commands.`;
     }
 
     basePrompt += `
@@ -321,7 +321,7 @@ Step 2: Analyze component dependencies and patterns
 Step 3: Propose refactoring strategy
 Step 4: Implement the refactoring changes
 
-Resource needs: I'll need read/write access to your project folder to examine and modify Vue component files.
+Resource needs: I have access to the workspace and can examine and modify Vue component files there.
 
 User: "What's the weather like?"
 Analysis: The user wants weather information. This is a simple informational request that doesn't require file access or complex planning.
@@ -353,10 +353,10 @@ Resource needs: None - this is a conversational response.`;
 Rules:
 - Extract intention analysis into "intention_analysis" field
 - Break down the plan into discrete steps in "step_plan" array
-- If file system access is needed, set "needs_user_path": true and provide clear guidance in "path_request.prompt" for UI folder/file selection
-- Set "path_request.access" to the required permission level (read/write/read_write)
-- If no file access needed, set "needs_user_path": false
-- Include all planned commands in "commands_to_execute" or empty array if none
+- IMPORTANT: If the user has a workspace set (indicated in their message with [Workspace: path]), do NOT ask for paths. Set "needs_user_path": false and use the workspace path in commands
+- Only set "needs_user_path": true if NO workspace is available AND file system access is needed
+- Set "path_request.access" to the required permission level (read/write/read_write) only when needs_user_path is true
+- Include all planned commands in "commands_to_execute" with working_dir set to the workspace path when available
 - Web search requests should set appropriate final_response and empty commands array
 
 Return ONLY valid JSON, nothing else.`;
@@ -384,8 +384,9 @@ Return ONLY valid JSON, nothing else.`;
   private static readonly VALIDATOR_PROMPT = `You are a strict validator for an AI assistant's draft reply.
 
 Decide if the draft correctly addresses the user's request under these rules:
-- If the task requires accessing local files/folders (e.g., analyze codebase/project, read/modify local files), the assistant must ask for the exact path(s) and required access (read/write) unless already provided. It must not invent paths.
-- If the task requires shell operations (e.g., list files, create/edit files, run tools), include concrete shell commands with arguments and a short explanation. Use an optional working_dir when helpful.
+- If the user's message contains [Workspace: path], the assistant must NOT ask for paths. It should use the workspace path directly in commands.
+- If no workspace is provided and the task requires accessing local files/folders, the assistant must ask for the exact path(s) and required access (read/write). It must not invent paths.
+- If the task requires shell operations (e.g., list files, create/edit files, run tools), include concrete shell commands with arguments and a short explanation. Use the workspace path as working_dir when available.
 - If the user asks to search the web, the assistant must state: "Web search is not supported yet." and may ask a relevant follow-up. No commands.
 - If the request is pure conversation, a simple response without commands is acceptable.
 
@@ -393,8 +394,9 @@ Return ONLY this minified JSON object:
 {"verdict":"pass"|"fail","reasons":string[],"required_changes":string[]}`;
 
   private static readonly REFINER_PROMPT = `You are revising an assistant's reply to satisfy strict requirements. Improve the draft so it fully complies with the validator feedback and rules:
-- Ask for precise file/folder path(s) and access type when local access is implied but not provided.
-- Include specific shell commands when appropriate.
+- If the user's message contains [Workspace: path], use that workspace path directly. Do NOT ask for paths.
+- Only ask for precise file/folder path(s) and access type when NO workspace is provided and local access is needed.
+- Include specific shell commands when appropriate, using workspace path as working_dir when available.
 - For web search requests, say "Web search is not supported yet." and optionally ask a follow-up.
 - Keep the reply natural and concise. Do not fabricate file paths.
 
@@ -684,7 +686,7 @@ Return ONLY the improved natural language reply.`;
           ? [
               {
                 role: "system" as const,
-                content: `Additional context: The user has workspace set to ${opts.workspacePath}. Consider this when determining if file access is needed.`,
+                content: `CRITICAL: The user has workspace set to ${opts.workspacePath}. DO NOT set needs_user_path to true. DO NOT ask for paths. Use this workspace path directly in your commands with working_dir set to "${opts.workspacePath}".`,
               },
             ]
           : []),
