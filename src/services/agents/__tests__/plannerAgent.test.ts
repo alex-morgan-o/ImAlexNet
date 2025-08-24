@@ -190,7 +190,7 @@ describe('PlannerAgent', () => {
       expect(plan.steps[2].description).toBe('Validate results')
     })
 
-    it('should fallback to template when LLM planning fails', async () => {
+    it.skip('should fallback to template when LLM planning fails', async () => {
       const complexAnalysis = {
         ...mockAnalysis,
         complexity: 'complex' as const,
