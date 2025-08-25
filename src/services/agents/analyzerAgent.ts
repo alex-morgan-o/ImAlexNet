@@ -61,14 +61,14 @@ export class AnalyzerAgent extends BaseAgent {
   private async analyzeUserIntent(prompt: string, context: AgentContext): Promise<AnalysisResult> {
     const analysisPrompt = this.buildAnalysisPrompt(prompt, context);
     
-    const response = await this.callLLM({
+    const response = await this.llm({
       messages: [
         { role: 'system', content: this.getAnalysisSystemPrompt() },
         { role: 'user', content: analysisPrompt }
       ],
       temperature: 0.3,
       max_tokens: 2048
-    });
+    }, context, { label: 'Analysis' });
 
     if (!response.success || !response.data?.message) {
       throw new Error(response.error || 'Failed to get analysis from LLM');

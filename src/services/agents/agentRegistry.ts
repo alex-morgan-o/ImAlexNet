@@ -90,6 +90,15 @@ export class AgentRegistry {
       input: input.substring(0, 100) + (input.length > 100 ? '...' : '')
     });
 
+    // Stream lifecycle into UI logs if available
+    try {
+      const preview = input.length > 1200 ? input.slice(0, 1200) + `\n… [truncated ${input.length - 1200} chars]` : input;
+      context.onProgress?.({ phase: 'log', text: `▶️ [${agent.type}] Starting (id=${agent.id})` });
+      context.onProgress?.({ phase: 'log', text: `📦 [${agent.type}] Input:\n${preview}` });
+    } catch (e) {
+      // ignore logging errors
+    }
+
     try {
       const response = await agent.execute(input, context);
       
@@ -99,6 +108,9 @@ export class AgentRegistry {
         success: response.success,
         hasResult: !!response.result
       });
+      try {
+        context.onProgress?.({ phase: 'log', text: `✅ [${agent.type}] Completed (success=${response.success})` });
+      } catch (_) {}
       
       return response;
     } catch (error) {
@@ -116,6 +128,9 @@ export class AgentRegistry {
         agentId: agent.id,
         error: errorResponse.error
       });
+      try {
+        context.onProgress?.({ phase: 'log', text: `❌ [${agent.type}] Error: ${errorResponse.error}` });
+      } catch (_) {}
 
       return errorResponse;
     }

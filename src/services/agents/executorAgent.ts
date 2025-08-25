@@ -125,7 +125,7 @@ export class ExecutorAgent extends BaseAgent {
 
   private async executeConversation(_step: PlanStep, _analysis: AnalysisResult | null, context: AgentContext): Promise<ExecutionResult> {
     // Generate conversational response
-    const response = await this.callLLM({
+    const response = await this.llm({
       messages: [
         { 
           role: 'system', 
@@ -139,7 +139,7 @@ export class ExecutorAgent extends BaseAgent {
       ],
       temperature: 0.7,
       max_tokens: 2048
-    });
+    }, context, { label: 'Conversation' });
 
     if (!response.success || !response.data?.message) {
       throw new Error('Failed to generate conversational response');
@@ -194,7 +194,7 @@ export class ExecutorAgent extends BaseAgent {
 
   private async executeInformationRequest(_step: PlanStep, _analysis: AnalysisResult | null, context: AgentContext): Promise<ExecutionResult> {
     // Generate informational response or commands if needed
-    const response = await this.callLLM({
+    const response = await this.llm({
       messages: [
         { 
           role: 'system', 
@@ -228,7 +228,7 @@ If you can answer directly, respond with JSON in this format:
       ],
       temperature: 0.4,
       max_tokens: 2048
-    });
+    }, context, { label: 'Info Request' });
 
     if (!response.success || !response.data?.message) {
       throw new Error('Failed to process information request');
@@ -240,7 +240,7 @@ If you can answer directly, respond with JSON in this format:
       if (responseData.needsCommands) {
         // Execute the commands
         const commands = responseData.commands || [];
-        const commandResults = await this.executeCommands(commands);
+        const commandResults = await this.executeCommands(commands, context);
         
         return {
           success: true,
@@ -325,7 +325,7 @@ Generate shell commands to fulfill this request. Respond with JSON:
 
 Only generate safe, necessary commands. Be specific with file paths.`;
 
-    const response = await this.callLLM({
+    const response = await this.llm({
       messages: [
         { 
           role: 'system', 
@@ -335,7 +335,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
       ],
       temperature: 0.3,
       max_tokens: 2048
-    });
+    }, context, { label: 'Command Generation' });
 
     if (!response.success || !response.data?.message) {
       throw new Error('Failed to generate commands');
@@ -354,7 +354,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
       }
 
       // Execute the commands
-      const commandResults = await this.executeCommands(commands);
+      const commandResults = await this.executeCommands(commands, context);
       
       return {
         success: true,
@@ -370,11 +370,14 @@ Only generate safe, necessary commands. Be specific with file paths.`;
     }
   }
 
-  private async executeCommands(commands: any[]): Promise<any[]> {
+  private async executeCommands(commands: any[], context?: AgentContext): Promise<any[]> {
     const results = [];
 
     for (const cmd of commands) {
       try {
+        if (context) {
+          this.emitProgress({ phase: 'log', text: `🛠️ [${this.type}] Execute: ${cmd.command} ${(cmd.args || []).join(' ')}${cmd.working_dir ? ` (cwd: ${cmd.working_dir})` : ''}` }, context);
+        }
         const result = await invoke<{
           success: boolean;
           stdout: string;
@@ -396,6 +399,13 @@ Only generate safe, necessary commands. Be specific with file paths.`;
           working_dir: cmd.working_dir,
           exit_code: result.exit_code,
         });
+        if (result.success) {
+          const out = (result.stdout || '').trim();
+          if (context) this.emitProgress({ phase: 'log', text: `✅ [${this.type}] Exit ${result.exit_code ?? 0}${out ? `\n${out.slice(0, 800)}${out.length > 800 ? '\n… [truncated]' : ''}` : ''}` }, context);
+        } else {
+          const err = (result.stderr || '').trim();
+          if (context) this.emitProgress({ phase: 'log', text: `❌ [${this.type}] Failed${typeof result.exit_code === 'number' ? ` (exit ${result.exit_code})` : ''}${err ? `\n${err.slice(0, 800)}${err.length > 800 ? '\n… [truncated]' : ''}` : ''}` }, context);
+        }
       } catch (error) {
         const errMsg = error instanceof Error ? error.message : 'Command execution failed';
         results.push({
@@ -407,6 +417,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
           args: cmd.args || [],
           working_dir: cmd.working_dir,
         });
+        if (context) this.emitProgress({ phase: 'log', text: `💥 [${this.type}] Command error: ${errMsg}` }, context);
       }
     }
 
@@ -418,7 +429,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
     this.logThought('Handling direct prompt execution');
     
     try {
-      const response = await this.callLLM({
+      const response = await this.llm({
         messages: [
           { 
             role: 'system', 
@@ -432,7 +443,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
         ],
         temperature: 0.6,
         max_tokens: 2048
-      });
+      }, context, { label: 'Direct Prompt' });
 
       if (response.success && response.data?.message) {
         const executionResult: ExecutionResult = {

@@ -15,6 +15,7 @@ export abstract class BaseAgent implements Agent {
 
   abstract execute(prompt: string, context: AgentContext): Promise<AgentResponse>;
 
+  // Low-level LLM call (no progress logging)
   protected async callLLM(request: LLMRequest): Promise<LLMResponse> {
     try {
       const response = await invoke<LLMResponse>("cerebras_chat", {
@@ -33,6 +34,48 @@ export abstract class BaseAgent implements Agent {
         error: error instanceof Error ? error.message : 'Unknown LLM error'
       };
     }
+  }
+
+  // High-level LLM call with detailed onProgress logging into the UI
+  protected async llm(
+    request: LLMRequest,
+    context: AgentContext,
+    opts: { label?: string; truncate?: number } = {}
+  ): Promise<LLMResponse> {
+    const { label = 'LLM', truncate = 2000 } = opts;
+
+    const safe = (s: string) => this.sanitizeJsonLike(String(s || ''));
+    const truncateText = (s: string) => (s.length > truncate ? s.slice(0, truncate) + `\n… [truncated ${s.length - truncate} chars]` : s);
+    const messagesPreview = (request.messages || [])
+      .map(m => `${m.role.toUpperCase()}:\n${safe(m.content)}`)
+      .join('\n\n');
+
+    this.emitProgress({
+      phase: 'log',
+      text: `📤 [${this.type}] ${label} request → model=${request.model || 'qwen-3-coder-480b'}, temp=${request.temperature ?? 0.3}, max_tokens=${request.max_tokens ?? 65536}`
+    }, context);
+    this.emitProgress({
+      phase: 'log',
+      text: `📝 [${this.type}] Prompt:\n${truncateText(messagesPreview)}`
+    }, context);
+
+    const started = Date.now();
+    const resp = await this.callLLM(request);
+    const duration = Date.now() - started;
+
+    if (resp.success && resp.data?.message) {
+      this.emitProgress({
+        phase: 'log',
+        text: `📥 [${this.type}] Response (${duration}ms):\n${truncateText(safe(resp.data.message))}`
+      }, context);
+    } else {
+      this.emitProgress({
+        phase: 'log',
+        text: `⚠️ [${this.type}] LLM error (${duration}ms): ${resp.error || 'Unknown error'}`
+      }, context);
+    }
+
+    return resp;
   }
 
   protected emitProgress(event: CoTProgressEvent, context: AgentContext): void {

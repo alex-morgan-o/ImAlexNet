@@ -94,14 +94,14 @@ export class PlannerAgent extends BaseAgent {
   private async createDetailedPlanWithLLM(analysis: AnalysisResult, context: AgentContext): Promise<ExecutionPlan> {
     const planningPrompt = this.buildDetailedPlanningPrompt(analysis, context);
     
-    const response = await this.callLLM({
+    const response = await this.llm({
       messages: [
         { role: 'system', content: this.getDetailedPlanningSystemPrompt() },
         { role: 'user', content: planningPrompt }
       ],
       temperature: 0.4,
       max_tokens: 4096
-    });
+    }, context, { label: 'Planning' });
 
     if (!response.success || !response.data?.message) {
       throw new Error(response.error || 'Failed to create detailed plan');
