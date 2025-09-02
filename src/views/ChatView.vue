@@ -52,9 +52,36 @@
                 </div>
             </div>
 
+            <!-- Debug Section for Prompts -->
+            <div v-if="showDebugPrompts" class="mx-4 mb-4 p-4 bg-gray-800 rounded-lg border border-gray-600">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-sm font-medium text-gray-300">Debug: Prompts Sent to ChainOfThoughtProcessor</h3>
+                    <button
+                        @click="clearDebugPrompts"
+                        class="text-xs px-2 py-1 bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
+                    >
+                        Clear
+                    </button>
+                </div>
+                <div class="max-h-60 overflow-y-auto space-y-2">
+                    <div v-for="(prompt, index) in debugPrompts" :key="index" class="bg-gray-900 p-2 rounded text-xs">
+                        <div class="text-gray-400 mb-1">{{ prompt.timestamp }} - {{ prompt.type }}</div>
+                        <div class="text-gray-200 whitespace-pre-wrap font-mono">{{ prompt.content }}</div>
+                    </div>
+                </div>
+                <div v-if="debugPrompts.length === 0" class="text-gray-500 text-xs">No prompts captured yet</div>
+            </div>
+
             <!-- Simple Chat Input - Fixed at bottom -->
             <div class="p-4">
                 <div class="flex items-center space-x-2 p-4 rounded-lg">
+                    <button
+                        @click="showDebugPrompts = !showDebugPrompts"
+                        class="px-2 py-1 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
+                        title="Toggle debug prompts view"
+                    >
+                        {{ showDebugPrompts ? 'Hide' : 'Debug' }}
+                    </button>
                     <input
                         ref="inputRef"
                         v-model="inputText"
@@ -73,6 +100,13 @@
                 </div>
             </div>
         </div>
+        <!-- Right-side Agent Graph Panel -->
+        <div class="w-[360px] shrink-0 border-l border-dark-500 bg-dark-800 flex flex-col">
+            <div class="sticky top-0 h-screen max-h-screen overflow-y-auto p-2">
+                <AgentGraph v-if="agentGraph.nodes.length" :graph="agentGraph" />
+            </div>
+        </div>
+
         <!-- Toast Notification -->
         <div v-if="toast" :class="['toast',
                              toast.type === 'success' ? 'toast-success' : '',
@@ -91,6 +125,13 @@
             @cancel="cancelPathInput"
             @confirm="confirmPathInput"
         />
+        <CommandPermissionDialog
+            v-if="showPermissionDialog && pendingCommand"
+            :command="{ needsCommand: true, command: pendingCommand!.command, args: pendingCommand!.args, explanation: pendingCommand!.explanation || '', confidence: 0.8 }"
+            :userMessage="pendingUserMessage"
+            @approve="approveCommand"
+            @deny="denyCommand"
+        />
     </div>
 </template>
 
@@ -98,8 +139,10 @@
 import { ref, onMounted, nextTick, watch } from "vue";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
+import AgentGraph from "../components/AgentGraph.vue";
 import NewSessionPrompt from "../components/NewSessionPrompt.vue";
 import PathInputDialog from "../components/PathInputDialog.vue";
+import CommandPermissionDialog from "../components/CommandPermissionDialog.vue";
 // import {
 //     CerebrasService,
 //     type ChatMessage as CerebrasMessage,
@@ -129,6 +172,17 @@ const messagesContainer = ref<HTMLElement>();
 const currentSession = ref<ChatSession | null>(null);
 const workingDirectory = ref<string | null>(null);
 const showNewSessionPrompt = ref(false);
+
+// Debug prompts tracking
+const showDebugPrompts = ref(false);
+const debugPrompts = ref<Array<{
+    timestamp: string;
+    type: string;
+    content: string;
+}>>([]);
+
+// Agent orchestration graph state
+const agentGraph = ref<{ nodes: Array<{ id: string; type: string; label: string; status?: 'idle' | 'running' | 'success' | 'error' }>; edges: Array<{ from: string; to: string; label?: string }>; note?: string }>({ nodes: [], edges: [], note: '' });
 
 // Simple toast notifications
 const toast = ref<{ message: string; type: "success" | "error" | "info" } | null>(null);
@@ -190,11 +244,18 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
         };
         messages.value.push(aiMessage);
 
-        // Get recent messages for context (convert to simple format)
-        const contextMessages = messages.value.slice(-4).map((msg) => ({
+        // Get recent messages for context (pass all exchanges in JSON format)
+        const contextMessages = messages.value.slice(-10).map((msg) => ({
             role: msg.role,
             content: msg.content || "",
+            timestamp: msg.timestamp?.toISOString() || new Date().toISOString(),
+            files: msg.files || [],
+            ...(msg.commandResult && { commandResult: msg.commandResult })
         }));
+
+        // Debug: Capture the user message and context being sent
+        addDebugPrompt("User Message", messageData.text);
+        addDebugPrompt("Context Messages", JSON.stringify(contextMessages, null, 2));
 
         // Use chain-of-thought processing with streaming progress
         // Buffer to collect step-by-step logs (and streamed analysis)
@@ -258,6 +319,20 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                         (current as any).isStreaming = false;
                         if (idx !== -1)
                             messages.value[idx] = { ...(current as any) };
+                    } else if ((evt as any).phase === 'agent_graph') {
+                        const g = (evt as any).graph || { nodes: [], edges: [], note: '' };
+                        try { console.debug('[ChatView] agent_graph', g); } catch (_) {}
+                        agentGraph.value = g;
+                    } else if ((evt as any).phase === 'agent_event') {
+                        const e = (evt as any).event || {};
+                        try { console.debug('[ChatView] agent_event', e); } catch (_) {}
+                        // Update node status based on agent events
+                        const nodeIdx = agentGraph.value.nodes.findIndex(n => n.type === e.agentType || n.id === e.agentId);
+                        if (nodeIdx !== -1) {
+                            if (e.type === 'executing') agentGraph.value.nodes[nodeIdx].status = 'running';
+                            if (e.type === 'completed') agentGraph.value.nodes[nodeIdx].status = e.success ? 'success' : 'error';
+                            if (e.type === 'error') agentGraph.value.nodes[nodeIdx].status = 'error';
+                        }
                     } else if (evt.phase === "error") {
                         logsBuffer +=
                             (logsBuffer ? "\n" : "") +
@@ -270,6 +345,10 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                         if (idx !== -1)
                             messages.value[idx] = { ...(current as any) };
                     }
+                },
+                {
+                    workingDirectory: workingDirectory.value || undefined,
+                    currentSession: currentSession.value || undefined,
                 },
             );
 
@@ -320,15 +399,25 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
             // Show that commands are being executed
             isLoading.value = true;
             // Apply default working directory if any command is missing it
-            const commandsWithWD = thoughtResult.commands_to_execute.map(
-                (c) => ({
-                    ...c,
-                    working_dir:
-                        c.working_dir || workingDirectory.value || undefined,
-                }),
-            );
-            const commandResults =
-                await ChainOfThoughtProcessor.executeCommands(commandsWithWD);
+            const commandsWithWD = thoughtResult.commands_to_execute.map((c) => ({
+                ...c,
+                working_dir: c.working_dir || workingDirectory.value || undefined,
+            }));
+
+            // Confirm commands that may operate outside the working directory
+            const acceptedCommands: typeof commandsWithWD = [];
+            for (const cmd of commandsWithWD) {
+                if (shouldRequestApproval(cmd, workingDirectory.value || undefined)) {
+                    const approved = await requestCommandApproval(cmd, userMessage.content || "");
+                    if (!approved) {
+                        console.log("Skipping command per user decision:", cmd);
+                        continue;
+                    }
+                }
+                acceptedCommands.push(cmd);
+            }
+
+            const commandResults = await ChainOfThoughtProcessor.executeCommands(acceptedCommands);
             console.log("✅ Command execution results:", commandResults);
 
             // Update the AI message with command results
@@ -745,6 +834,52 @@ async function handleRequestFolder(message: Message) {
     }
 }
 
+// --- Command permission gating ---
+const showPermissionDialog = ref(false);
+const pendingCommand = ref<{ command: string; args: string[]; working_dir?: string; explanation?: string } | null>(null);
+const pendingUserMessage = ref<string>("");
+let permissionResolver: ((approved: boolean) => void) | null = null;
+
+function shouldRequestApproval(
+    cmd: { command: string; args: string[]; working_dir?: string },
+    wd?: string,
+): boolean {
+    // Prompt if command is potentially destructive or targets absolute paths outside working dir
+    const risky = new Set(["rm", "mv", "cp", "mkdir", "touch", "sh"]);
+    const hasRisk = risky.has(cmd.command);
+    const hasAbsoluteArg = (cmd.args || []).some(
+        (a) => a.startsWith("/") || a.startsWith("~") || /^[A-Za-z]:\\/.test(a),
+    );
+    const wdMismatch = !!(cmd.working_dir && wd && !cmd.working_dir.startsWith(wd));
+    return hasRisk || hasAbsoluteArg || wdMismatch;
+}
+
+function requestCommandApproval(
+    cmd: { command: string; args: string[]; working_dir?: string; explanation?: string },
+    userMsg: string,
+): Promise<boolean> {
+    pendingCommand.value = cmd;
+    pendingUserMessage.value = userMsg;
+    showPermissionDialog.value = true;
+    return new Promise((resolve) => {
+        permissionResolver = resolve;
+    });
+}
+
+function approveCommand() {
+    showPermissionDialog.value = false;
+    const resolver = permissionResolver;
+    permissionResolver = null;
+    resolver?.(true);
+}
+
+function denyCommand() {
+    showPermissionDialog.value = false;
+    const resolver = permissionResolver;
+    permissionResolver = null;
+    resolver?.(false);
+}
+
 // Manual path input state (fallback when dialog is blocked)
 const pathInput = ref<{
     show: boolean;
@@ -795,6 +930,24 @@ function cancelPathInput() {
 
 function dismissNewSessionPrompt() {
     showNewSessionPrompt.value = false;
+}
+
+// Debug prompts functions
+function clearDebugPrompts() {
+    debugPrompts.value = [];
+}
+
+function addDebugPrompt(type: string, content: string) {
+    const timestamp = new Date().toLocaleTimeString();
+    debugPrompts.value.push({
+        timestamp,
+        type,
+        content: typeof content === 'object' ? JSON.stringify(content, null, 2) : content
+    });
+    // Keep only last 10 prompts to avoid memory issues
+    if (debugPrompts.value.length > 10) {
+        debugPrompts.value = debugPrompts.value.slice(-10);
+    }
 }
 </script>
 

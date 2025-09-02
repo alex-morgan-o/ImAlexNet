@@ -274,6 +274,70 @@ fn save_tools_snapshot(snapshot: &HashMap<String, ToolInfo>) -> Result<(), Strin
     Ok(())
 }
 
+fn load_tools_snapshot_file() -> Option<HashMap<String, ToolInfo>> {
+    let dir = get_or_create_alexnet_dir().ok()?;
+    let path = dir.join("tools.json");
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<HashMap<String, ToolInfo>>(&data).ok()
+}
+
+fn resolve_tool_path(tool_name: &str) -> Option<String> {
+    // 1) Prefer previously persisted snapshot
+    if let Some(snapshot) = load_tools_snapshot_file() {
+        if let Some(info) = snapshot.get(tool_name) {
+            if info.installed {
+                if let Some(p) = &info.path {
+                    if !p.trim().is_empty() { return Some(p.clone()); }
+                }
+            }
+        }
+    }
+
+    // 2) Try current environment via command -v (may be limited when launched from GUI)
+    if let Some(p) = find_command_path(tool_name) {
+        if !p.trim().is_empty() { return Some(p); }
+    }
+
+    // 3) Heuristic: common locations (macOS/Homebrew, user bins)
+    #[cfg(target_os = "macos")]
+    {
+        let candidates = vec![
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ];
+        for dir in candidates {
+            let p = Path::new(dir).join(tool_name);
+            if p.exists() { return Some(p.to_string_lossy().to_string()); }
+        }
+    }
+
+    // 4) Heuristic: look into common user-managed bins (NVM, npm-global, local bin)
+    if let Some(home) = dirs::home_dir() {
+        // ~/.local/bin
+        let p = home.join(".local/bin").join(tool_name);
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+
+        // ~/.npm-global/bin
+        let p = home.join(".npm-global/bin").join(tool_name);
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+
+        // ~/.nvm/versions/node/*/bin/tool_name (scan limited depth)
+        let nvm_root = home.join(".nvm/versions/node");
+        if nvm_root.exists() {
+            if let Ok(entries) = fs::read_dir(&nvm_root) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join("bin").join(tool_name);
+                    if candidate.exists() {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[tauri::command]
 fn get_tool_availability() -> Result<ToolAvailability, String> {
     let snapshot = collect_tools_snapshot();
@@ -873,6 +937,8 @@ fn validate_shell_command(command: &str, args: &[String]) -> Result<(), String> 
     let allowed_commands = [
         "cat", "ls", "mkdir", "rm", "mv", "cp", "touch", "echo", "head", "tail", "wc", "find",
         "grep", "sed", "awk", "sh",
+        // AI tooling (explicitly allowed for coding-task delegation)
+        "claude", "codex",
     ];
 
     if !allowed_commands.contains(&command) {
@@ -969,8 +1035,14 @@ async fn execute_shell_command(
         get_safe_base_directories().into_iter().next()
     };
 
+    // Resolve executable for certain tools (e.g., codex/claude) to handle user-specific install paths
+    let executable = match command.as_str() {
+        "codex" | "claude" => resolve_tool_path(&command).unwrap_or_else(|| command.clone()),
+        _ => command.clone(),
+    };
+
     // Execute the command
-    let mut cmd = Command::new(&command);
+    let mut cmd = Command::new(&executable);
     // Use expanded args to support paths like ~/Downloads without invoking a shell
     cmd.args(&expanded_args);
 
@@ -979,7 +1051,35 @@ async fn execute_shell_command(
     }
 
     // Set environment variables for safety
-    cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin"); // Restrict PATH
+    // Build a minimal PATH, augmenting with tool-specific runtime needs (e.g., node for codex)
+    let mut path_entries: Vec<String> = vec![
+        "/usr/local/bin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+    ];
+
+    // Add the directory of the resolved executable (safer for wrappers)
+    if let Some(exe_parent) = Path::new(&executable).parent() {
+        let p = exe_parent.to_string_lossy().to_string();
+        if !p.is_empty() && !path_entries.contains(&p) {
+            path_entries.push(p);
+        }
+    }
+
+    // If invoking codex/claude, add node dir if found (for shebang `env node`)
+    if command == "codex" || command == "claude" {
+        if let Some(node_path) = resolve_tool_path("node") {
+            if let Some(node_dir) = Path::new(&node_path).parent() {
+                let p = node_dir.to_string_lossy().to_string();
+                if !p.is_empty() && !path_entries.contains(&p) {
+                    path_entries.push(p);
+                }
+            }
+        }
+    }
+
+    let path_value = path_entries.join(":");
+    cmd.env("PATH", path_value);
     cmd.env_remove("SHELL"); // Remove shell environment for extra safety
 
     let output = cmd

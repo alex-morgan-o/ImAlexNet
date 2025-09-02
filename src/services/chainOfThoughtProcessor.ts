@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getAgentManager } from './agents/agentManager';
+import { AgentResponse } from './agents/types';
 
 export interface ChainOfThoughtStep {
   step: number;
@@ -38,9 +40,165 @@ export type CoTProgressEvent =
   | { phase: "format_start" }
   | { phase: "format_done" }
   | { phase: "log"; text: string }
-  | { phase: "error"; message: string };
+  | { phase: "error"; message: string }
+  | { phase: "agent_graph"; graph: { nodes: Array<{ id: string; type: string; label: string; status?: 'idle' | 'running' | 'success' | 'error'; badge?: string }>; edges: Array<{ from: string; to: string; label?: string; highlight?: boolean; dependency?: boolean }>; note?: string } }
+  | { phase: "agent_event"; event: { type: 'executing' | 'completed' | 'error'; agentType: string; agentId: string; message?: string; success?: boolean } };
 
 export class ChainOfThoughtProcessor {
+  // LLM-based classifier for coding intent and complexity
+  private static readonly CODING_CLASSIFIER_PROMPT = `You are an expert classifier for an AI assistant.
+
+Classify the user's request:
+- is_coding_task: true if the user wants to create, modify, generate, scaffold, refactor, or review code/projects/apps/components; false otherwise
+- complexity: simple | medium | complex
+
+Complexity guidelines:
+- simple: one or two small edits or explanations; minimal or no file creation
+- medium: multi-file creation or edits; scaffolding a basic app or feature; requires several steps
+- complex: multi-step project with planning, many files, dependencies, or ambiguous scope requiring coordination
+
+Return ONLY valid minified JSON with this schema:
+{"is_coding_task":true|false,"complexity":"simple"|"medium"|"complex","reason":string}`;
+
+  private static async classifyCodingIntentWithLLM(
+    userMessage: string,
+    context: Array<{ role: string; content: string }>,
+  ): Promise<{ is_coding_task: boolean; complexity: 'simple' | 'medium' | 'complex'; reason?: string } | null> {
+    try {
+      const messages = [
+        { role: 'system', content: this.CODING_CLASSIFIER_PROMPT },
+        { role: 'user', content: `User request: ${userMessage}\n\nRecent context:\n${context.map(m => `${m.role}: ${m.content}`).join('\n')}` },
+      ];
+
+      const resp = await invoke<{
+        success: boolean;
+        data?: { message: string };
+        error?: string;
+      }>('cerebras_chat', {
+        messages,
+        model: 'qwen-3-coder-480b',
+        max_tokens: 512,
+        temperature: 0.0,
+        stream: false,
+      });
+
+      if (!resp.success || !resp.data?.message) return null;
+      const raw = this.sanitizeJsonLike(this.maybeUnwrapQuotedJson(resp.data.message.trim()));
+      const m = raw.match(/\{[\s\S]*\}/);
+      const json = m ? m[0] : raw;
+      const parsed = JSON.parse(json);
+      if (typeof parsed.is_coding_task !== 'boolean') return null;
+      if (!['simple', 'medium', 'complex'].includes(parsed.complexity)) return null;
+      return parsed as { is_coding_task: boolean; complexity: 'simple' | 'medium' | 'complex'; reason?: string };
+    } catch (e) {
+      console.warn('[ChainOfThoughtProcessor] Coding intent classification failed:', e);
+      return null;
+    }
+  }
+  // Heuristic: detect if a prompt appears to be a coding task
+  private static isCodingTask(prompt: string, recentContext: Array<{ role: string; content: string }>): boolean {
+    const text = `${prompt}\n${recentContext.map(m => m.content).join('\n')}`.toLowerCase();
+    // Strong signals: explicit creation/building of apps, components, projects
+    const strongSignals: RegExp[] = [
+      /\b(create|build|scaffold|bootstrap|generate|make|implement)\b[\s\S]{0,60}\b(app|application|project|service|api|cli|library|component|module|website|web\s*app)\b/,
+      /\bcreate\b[\s\S]{0,40}\btodo\s*(app|application|list)\b/,
+      /\bstart\b[\s\S]{0,40}\b(project|app|application)\b/,
+    ];
+    // Auxiliary signals: code fences, file names, dev keywords
+    const auxSignals: RegExp[] = [
+      /```[\s\S]*?```/m,
+      /\b(src|lib|dist|build|package\.json|tsconfig\.json|cargo\.toml|requirements\.txt|index\.(html|ts|js|vue))\b/,
+      /\b(function|class|interface|module|import|export|def|fn|pub|async|await)\b/,
+      /\btest|jest|vitest|pytest|spec\b/,
+      /\bcompile|build|lint|format|prettier|eslint|tsc\b/,
+      /\brefactor|implement|fix\s*(a|the)?\s*bug|debug|optimi[sz]e\b/,
+      /\bvue|typescript|javascript|rust|python|go|java|node|vite|tauri\b/,
+    ];
+    if (strongSignals.some(r => r.test(text))) return true;
+    let score = 0;
+    for (const p of auxSignals) if (p.test(text)) score += 1;
+    return score >= 1; // be more permissive for short prompts
+  }
+
+  // Build CLI commands to hand off coding tasks to local tools (codex or claude)
+  private static async buildCodingCliHandoff(userMessage: string, workingDirectory?: string): Promise<{
+    final_response: string;
+    needs_user_path: boolean;
+    path_request?: { access: 'read' | 'write' | 'read_write'; prompt: string };
+    commands_to_execute: Array<{ command: string; args: string[]; working_dir?: string; explanation: string }>;
+  }> {
+    // Sanitize message for shell-arg safety (our backend forbids certain characters in args)
+    const safeMsg = userMessage.replace(/[;|&`$()<>]/g, '').trim();
+    // Ask backend which tools are available
+    let availability: { claude: boolean; codex: boolean; gemini?: boolean } = { claude: false, codex: false };
+    try {
+      availability = await invoke('get_tool_availability');
+    } catch (_) {}
+
+    const useCodex = Boolean(availability.codex);
+    const useClaude = !useCodex && Boolean(availability.claude);
+
+    const needPath = !workingDirectory;
+    const wd = workingDirectory || '';
+
+    const sharedGuidance = `This is a coding/development task. I'll hand it off to a local CLI purpose-built for coding. AlexNet will not generate or apply code itself here.`;
+
+    // If working directory isn't set, ask for it and do NOT return commands yet
+    if (needPath) {
+      return {
+        final_response: `${sharedGuidance} Please provide the project folder path where I should run the coding tool.`,
+        needs_user_path: true,
+        path_request: { access: 'read_write', prompt: 'Provide your project/workspace path for applying code changes.' },
+        commands_to_execute: [],
+      };
+    }
+
+    // Build conservative, commonly-supported args for each tool.
+    // Note: exact flags can vary across installations; we prefer clear, review-first workflows.
+    const commands: Array<{ command: string; args: string[]; working_dir?: string; explanation: string }> = [];
+
+    // Prefer Codex if available
+    if (useCodex) {
+      // Codex CLI pattern: codex exec --full-auto "…" (working_dir controls cwd)
+      commands.push({
+        command: 'codex',
+        args: ['exec', '--full-auto', '--skip-git-repo-check', safeMsg],
+        working_dir: wd || undefined,
+        explanation: 'Delegate the coding task to Codex CLI (exec --full-auto --skip-git-repo-check) in the selected working directory.'
+      });
+    } else if (useClaude) {
+      // Generic Claude CLI pattern for code workflows: claude code --dir <dir> "…"
+      commands.push({
+        command: 'claude',
+        args: ['code', ...(wd ? ['--dir', wd] : []), safeMsg],
+        working_dir: wd || undefined,
+        explanation: 'Delegate the coding task to Claude CLI code workflow in the selected working directory.'
+      });
+    } else {
+      // Neither available – provide both suggestions so users can install one
+      commands.push({
+        command: 'codex',
+        args: ['exec', '--full-auto', '--skip-git-repo-check', safeMsg],
+        working_dir: wd || undefined,
+        explanation: 'Preferred: Codex CLI (not detected). Install it and re-run to handle the coding task.'
+      });
+      commands.push({
+        command: 'claude',
+        args: ['code', ...(wd ? ['--dir', wd] : []), safeMsg],
+        working_dir: wd || undefined,
+        explanation: 'Alternative: Claude CLI (not detected). Install it and re-run to handle the coding task.'
+      });
+    }
+
+    const final_response = `${sharedGuidance} I will run the tool in: ${wd}`;
+
+    return {
+      final_response,
+      needs_user_path: false,
+      path_request: undefined,
+      commands_to_execute: commands,
+    };
+  }
   // Utility: strip code fences and ANSI/control characters that can break JSON
   private static sanitizeJsonLike(input: string): string {
     let s = input.trim();
@@ -229,12 +387,137 @@ Return ONLY the improved natural language reply.`;
 
   static async processUserMessage(
     userMessage: string,
-    context: Array<{ role: string; content: string }> = [],
+    context: Array<{ role: string; content: string; timestamp?: string; files?: any[]; commandResult?: any; }> = [],
+    onProgress?: (event: CoTProgressEvent) => void,
+    workspaceState?: { workingDirectory?: string; availableTools?: string[]; currentSession?: any }
+  ): Promise<ChainOfThoughtResult> {
+    // First, LLM classify coding intent and complexity. Medium or complex coding → delegate to Codex/Claude.
+    try {
+      const recent = context.slice(-4).map(m => ({ role: m.role, content: m.content }));
+      const cls = await ChainOfThoughtProcessor.classifyCodingIntentWithLLM(userMessage, recent);
+      if (cls?.is_coding_task && (cls.complexity === 'medium' || cls.complexity === 'complex')) {
+        onProgress?.({ phase: 'log', text: `🧠 Classifier: coding • ${cls.complexity} → delegate to local codex` });
+        const handoff = await ChainOfThoughtProcessor.buildCodingCliHandoff(userMessage, workspaceState?.workingDirectory);
+        return {
+          success: true,
+          reasoning: `Delegated by classifier (${cls.complexity}). ${cls.reason || ''}`.trim(),
+          steps: [],
+          final_response: handoff.final_response,
+          needs_user_path: handoff.needs_user_path,
+          path_request: handoff.path_request,
+          commands_to_execute: handoff.commands_to_execute,
+        };
+      }
+    } catch (e) {
+      console.warn('[ChainOfThoughtProcessor] Coding intent classification error, continuing with default flow:', e);
+    }
+
+    // Use new agent system by default, fall back to legacy if needed
+    try {
+      return await ChainOfThoughtProcessor.processWithAgentSystem(userMessage, context, onProgress, workspaceState);
+    } catch (agentError) {
+      console.warn('[ChainOfThoughtProcessor] Agent system failed, falling back to legacy processor:', agentError);
+      onProgress?.({ phase: "log", text: "⚠️ Using fallback processing..." });
+      // Emit a minimal fallback agent graph so the UI can render
+      try {
+        onProgress?.({
+          phase: 'agent_graph',
+          graph: {
+            nodes: [
+              { id: 'assistant-core', type: 'assistant', label: 'Assistant', status: 'running' }
+            ],
+            edges: [],
+            note: 'Fallback mode'
+          }
+        });
+      } catch (_) {}
+      return await ChainOfThoughtProcessor.processWithLegacySystem(userMessage, context, onProgress);
+    }
+  }
+
+  static async processWithAgentSystem(
+    userMessage: string,
+    context: Array<{ role: string; content: string; timestamp?: string; files?: any[]; commandResult?: any; }> = [],
+    onProgress?: (event: CoTProgressEvent) => void,
+    workspaceStateInput?: { workingDirectory?: string; availableTools?: string[]; currentSession?: any }
+  ): Promise<ChainOfThoughtResult> {
+    try {
+      onProgress?.({ phase: "analysis_start", message: "Initializing agent system..." });
+      
+      const agentManager = getAgentManager();
+      await agentManager.initialize();
+      
+      onProgress?.({ phase: "log", text: "🤖 Using multi-agent orchestration..." });
+      // Emit initial agent graph with all registered agents
+      try {
+        const status = agentManager.getSystemStatus();
+        const nodes = (status.registeredAgents || []).map((a: any) => ({
+          id: a.id,
+          type: String(a.type),
+          label: String(a.type).replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+          status: 'idle' as const
+        }));
+        // Simple default edges from orchestrator to others
+        const orchestrator = nodes.find(n => n.type === 'orchestrator');
+        const edges = orchestrator ? nodes.filter(n => n !== orchestrator).map(n => ({ from: orchestrator.id, to: n.id })) : [];
+        onProgress?.({ phase: 'agent_graph', graph: { nodes, edges, note: 'Agents initialized' } });
+      } catch (_) { /* ignore graph failures */ }
+
+      // Compose workspace state from caller, if provided
+      const workspaceState = {
+        workingDirectory: workspaceStateInput?.workingDirectory,
+        availableTools: workspaceStateInput?.availableTools || ['file-operations', 'command-execution', 'analysis'],
+        currentSession: workspaceStateInput?.currentSession,
+      };
+
+      const agentResponse: AgentResponse = await agentManager.processUserInput(
+        userMessage,
+        context,
+        workspaceState,
+        onProgress
+      );
+
+      onProgress?.({ phase: "format_done" });
+
+      if (!agentResponse.success) {
+        throw new Error(agentResponse.error || 'Agent processing failed');
+      }
+
+      // Convert agent response to legacy format
+      return ChainOfThoughtProcessor.convertAgentResponseToLegacyFormat(agentResponse, userMessage);
+
+    } catch (error) {
+      console.error('[ChainOfThoughtProcessor] Agent system processing failed:', error);
+      throw error; // Re-throw to trigger fallback
+    }
+  }
+
+  static async processWithLegacySystem(
+    userMessage: string,
+    context: Array<{ role: string; content: string; timestamp?: string; files?: any[]; commandResult?: any; }> = [],
     onProgress?: (event: CoTProgressEvent) => void,
   ): Promise<ChainOfThoughtResult> {
     try {
       // Step 1: Draft + validate + refine loop
       onProgress?.({ phase: "analysis_start", message: "Analyzing..." });
+      // Provide a simple agent graph for legacy mode
+      try {
+        onProgress?.({
+          phase: 'agent_graph',
+          graph: {
+            nodes: [
+              { id: 'legacy-analyzer', type: 'analyzer', label: 'Analyzer', status: 'running' },
+              { id: 'legacy-formatter', type: 'planner', label: 'Formatter', status: 'idle' },
+              { id: 'legacy-executor', type: 'executor', label: 'Executor', status: 'idle' }
+            ],
+            edges: [
+              { from: 'legacy-analyzer', to: 'legacy-formatter', label: 'Draft → JSON' },
+              { from: 'legacy-formatter', to: 'legacy-executor', label: 'Execute' }
+            ],
+            note: 'Legacy processing graph'
+          }
+        });
+      } catch (_) {}
       ChainOfThoughtProcessor.progress(
         onProgress,
         "🔍 Step 1: Drafting and validating response...",
@@ -600,6 +883,51 @@ Return ONLY the improved natural language reply.`;
     }
   }
 
+  static convertAgentResponseToLegacyFormat(agentResponse: AgentResponse, _userMessage: string): ChainOfThoughtResult {
+    const result = agentResponse.result;
+    
+    // If result is already in the expected format, use it directly
+    if (result && typeof result === 'object' && result.final_response) {
+      return {
+        success: agentResponse.success,
+        reasoning: agentResponse.thoughts || 'Multi-agent processing completed',
+        steps: [], // Legacy steps not used in agent system
+        final_response: result.final_response,
+        needs_user_path: result.needs_user_path || false,
+        path_request: result.path_request,
+        commands_to_execute: result.commands_to_execute || [],
+        error: agentResponse.error
+      };
+    }
+
+    // If result has execution result format, convert it
+    if (result && result.finalResponse) {
+      return {
+        success: agentResponse.success,
+        reasoning: agentResponse.thoughts || 'Multi-agent processing completed',
+        steps: [],
+        final_response: result.finalResponse,
+        needs_user_path: result.needsUserPath || false,
+        path_request: result.pathRequest,
+        commands_to_execute: result.commands || [],
+        error: agentResponse.error
+      };
+    }
+
+    // Fallback: create basic response
+    return {
+      success: agentResponse.success,
+      reasoning: agentResponse.thoughts || 'Multi-agent processing completed',
+      steps: [],
+      final_response: agentResponse.success 
+        ? (typeof result === 'string' ? result : JSON.stringify(result))
+        : `I encountered an issue processing your request: ${agentResponse.error || 'Unknown error'}`,
+      needs_user_path: false,
+      commands_to_execute: [],
+      error: agentResponse.error
+    };
+  }
+
   static async executeCommands(
     commands: Array<{
       command: string;
@@ -622,6 +950,9 @@ Return ONLY the improved natural language reply.`;
     const results = [];
 
     for (const cmd of commands) {
+      const effectiveWd = (cmd.working_dir && String(cmd.working_dir).trim())
+        ? String(cmd.working_dir).trim()
+        : undefined;
       try {
         const result = await invoke<{
           success: boolean;
@@ -631,7 +962,7 @@ Return ONLY the improved natural language reply.`;
         }>("execute_shell_command", {
           command: cmd.command,
           args: cmd.args,
-          workingDir: cmd.working_dir,
+          workingDir: effectiveWd,
         });
 
         results.push({
@@ -641,16 +972,19 @@ Return ONLY the improved natural language reply.`;
           explanation: cmd.explanation,
           command: cmd.command,
           args: cmd.args,
-          working_dir: cmd.working_dir,
+          working_dir: effectiveWd,
           exit_code: result.exit_code,
         });
       } catch (error) {
-        const errMsg =
-          typeof error === "string"
-            ? error
-            : error instanceof Error
-              ? error.message
-              : "Command execution failed";
+        const errMsg = (() => {
+          if (typeof error === 'string') return error;
+          if (error instanceof Error) return error.message;
+          try {
+            const s = JSON.stringify(error);
+            if (s && s !== '{}') return s;
+          } catch {}
+          return String(error ?? 'Command execution failed');
+        })();
         results.push({
           success: false,
           output: "",
