@@ -48,6 +48,8 @@ export interface ExecutionPlan {
   status: 'created' | 'active' | 'completed' | 'failed' | 'paused';
   createdAt: number;
   updatedAt: number;
+  // Optional: team composition for complex tasks
+  team?: TeamComposition;
 }
 
 export interface PlanStep {
@@ -62,6 +64,38 @@ export interface PlanStep {
   startedAt?: number;
   completedAt?: number;
   error?: string;
+  // Optional: assignment to a role from the team composition
+  assigneeRole?: string;
+  // Optional: dependencies by step number
+  dependencies?: number[];
+}
+
+// Team planning types for complex tasks
+export interface TeamComposition {
+  goal: string;
+  domain:
+    | 'app_development'
+    | 'web_app'
+    | 'mobile_app'
+    | 'data_engineering'
+    | 'data_science'
+    | 'devops'
+    | 'ai_agent'
+    | 'documentation'
+    | 'research'
+    | 'generic';
+  leadRole: string;
+  reviewerRole: string;
+  roles: TeamRole[];
+  orgChart?: Array<{ role: string; reportsTo?: string }>; // simple org chart
+}
+
+export interface TeamRole {
+  role: string;
+  description: string;
+  responsibilities: string[];
+  successCriteria?: string[];
+  suggestedTools?: string[];
 }
 
 export interface AgentMessage {

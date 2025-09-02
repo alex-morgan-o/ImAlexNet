@@ -89,6 +89,9 @@ export class AgentRegistry {
       agentId: agent.id, 
       input: input.substring(0, 100) + (input.length > 100 ? '...' : '')
     });
+    try {
+      context.onProgress?.({ phase: 'agent_event', event: { type: 'executing', agentType: String(agentType), agentId: agent.id } });
+    } catch (_) {}
 
     // Stream lifecycle into UI logs if available
     try {
@@ -110,6 +113,7 @@ export class AgentRegistry {
       });
       try {
         context.onProgress?.({ phase: 'log', text: `✅ [${agent.type}] Completed (success=${response.success})` });
+        context.onProgress?.({ phase: 'agent_event', event: { type: 'completed', agentType: String(agentType), agentId: agent.id, success: response.success } });
       } catch (_) {}
       
       return response;
@@ -130,6 +134,7 @@ export class AgentRegistry {
       });
       try {
         context.onProgress?.({ phase: 'log', text: `❌ [${agent.type}] Error: ${errorResponse.error}` });
+        context.onProgress?.({ phase: 'agent_event', event: { type: 'error', agentType: String(agentType), agentId: agent.id, message: errorResponse.error } });
       } catch (_) {}
 
       return errorResponse;

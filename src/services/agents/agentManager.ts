@@ -3,6 +3,7 @@ import { OrchestrationAgent } from './orchestrationAgent';
 import { AnalyzerAgent } from './analyzerAgent';
 import { PlannerAgent } from './plannerAgent';
 import { ExecutorAgent } from './executorAgent';
+import { ValidatorAgent } from './validatorAgent';
 import { AgentType, AgentContext, AgentResponse } from './types';
 import { CoTProgressEvent } from '../chainOfThoughtProcessor';
 
@@ -30,6 +31,7 @@ export class AgentManager {
       this.registry.registerAgent(new AnalyzerAgent());
       this.registry.registerAgent(new PlannerAgent());
       this.registry.registerAgent(new ExecutorAgent());
+      this.registry.registerAgent(new ValidatorAgent());
 
       // Set up event listeners
       this.setupEventListeners();

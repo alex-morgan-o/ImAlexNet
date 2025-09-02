@@ -9,6 +9,7 @@ export * from './analyzerAgent';
 export * from './plannerAgent';
 export * from './executorAgent';
 export * from './orchestrationAgent';
+export * from './validatorAgent';
 
 // Convenience exports
 export { getAgentManager } from './agentManager';

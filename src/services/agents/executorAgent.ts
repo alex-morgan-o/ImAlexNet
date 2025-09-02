@@ -105,6 +105,12 @@ export class ExecutorAgent extends BaseAgent {
   private async executeStep(step: PlanStep, analysis: AnalysisResult | null, context: AgentContext): Promise<ExecutionResult> {
     const executionType = step.inputs?.executionType || step.inputs?.requestType || (analysis?.intentCategory);
     
+    // Secondary guard: if step implies scaffolding or multi-file code creation and Codex is available, delegate to Codex CLI
+    const maybeDelegated = await this.tryDelegateCodingToCLI(step, analysis, context);
+    if (maybeDelegated) {
+      return maybeDelegated;
+    }
+    
     switch (executionType) {
       case 'conversation':
         return this.executeConversation(step, analysis, context);
@@ -120,6 +126,88 @@ export class ExecutorAgent extends BaseAgent {
         return this.executeWorkspaceSetup(step, analysis, context);
       default:
         return this.executeGeneric(step, analysis, context);
+    }
+  }
+
+  private sanitizeShellArg(s: string): string {
+    return String(s).replace(/[;|&`$()<>]/g, '').trim();
+  }
+
+  private impliesScaffoldingOrMultiFile(step: PlanStep, analysis: AnalysisResult | null, userPrompt: string): boolean {
+    const desc = (step.description || '').toLowerCase();
+    const prompt = (userPrompt || '').toLowerCase();
+    const files: any[] = Array.isArray(step.inputs?.filesToCreate) ? step.inputs!.filesToCreate : [];
+
+    // Strong signals
+    const strongPatterns: RegExp[] = [
+      /\bscaffold|bootstrap|generate\b/,
+      /\bcreate\s+(project|app|application|component|module|cli|api|library)\b/,
+      /\bdirectory structure|file structure|project structure\b/,
+    ];
+    const hasStrong = strongPatterns.some(r => r.test(desc)) || strongPatterns.some(r => r.test(prompt));
+
+    // Multi-file signal
+    const multiFile = Array.isArray(files) && files.length >= 2;
+
+    // Analysis-based signal
+    const complexish = !!analysis && (analysis.complexity === 'medium' || analysis.complexity === 'complex');
+
+    // Also detect app creation intent from prompt for common cases like "create a todo app"
+    const appCreate = /\b(create|build|start|make)\b[\s\S]{0,60}\b(app|application|project|component|cli|library)\b/.test(prompt);
+
+    return (hasStrong || multiFile || appCreate) && complexish;
+  }
+
+  private async tryDelegateCodingToCLI(step: PlanStep, analysis: AnalysisResult | null, context: AgentContext): Promise<ExecutionResult | null> {
+    try {
+      if (!this.impliesScaffoldingOrMultiFile(step, analysis, context.userPrompt)) {
+        return null;
+      }
+
+      // Check tool availability (prefer Codex)
+      const availability = await invoke<{ codex: boolean; claude: boolean; gemini?: boolean }>('get_tool_availability');
+      if (!availability?.codex) {
+        // Only short-circuit when Codex is available per request
+        return null;
+      }
+
+      const wd = context.workspaceState?.workingDirectory || '';
+      if (!wd) {
+        return {
+          success: true,
+          result: { type: 'path-request' },
+          needsUserPath: true,
+          pathRequest: {
+            access: 'read_write',
+            prompt: 'Please provide the working directory for Codex CLI to apply code changes.'
+          },
+          finalResponse: 'I need a working directory to delegate this coding task to Codex CLI. Please provide the path where I should run it.'
+        };
+      }
+
+      const safeMsg = this.sanitizeShellArg(context.userPrompt);
+      const commands = [
+        {
+          command: 'codex',
+          args: ['exec', '--full-auto', '--skip-git-repo-check', safeMsg],
+          working_dir: wd,
+          explanation: 'Delegate the coding task to Codex CLI (exec --full-auto --skip-git-repo-check) in the selected working directory.'
+        }
+      ];
+
+      // Emit progress note
+      this.emitProgress({ phase: 'log', text: `🚀 [${this.type}] Delegating coding task to Codex CLI${wd ? ` (cwd: ${wd})` : ''}` }, context);
+
+      return {
+        success: true,
+        result: { type: 'delegated-cli' },
+        commands,
+        finalResponse: 'Detected scaffolding/multi-file coding task. Delegating to Codex CLI in your working directory.'
+      };
+    } catch (e) {
+      // If delegation fails for any reason, proceed with normal execution
+      this.emitProgress({ phase: 'log', text: `⚠️ [${this.type}] Delegation check failed, continuing default flow` }, context);
+      return null;
     }
   }
 
@@ -305,6 +393,10 @@ If you can answer directly, respond with JSON in this format:
   }
 
   private async generateAndExecuteCommands(type: string, _step: PlanStep, _analysis: AnalysisResult | null, context: AgentContext): Promise<ExecutionResult> {
+    const wd = context.workspaceState?.workingDirectory || '';
+    const workingDirSnippet = wd
+      ? `,\n      \"working_dir\": \"${wd}\"`
+      : '';
     const commandGenerationPrompt = `
 User Request: "${context.userPrompt}"
 Task Type: ${type}
@@ -316,8 +408,7 @@ Generate shell commands to fulfill this request. Respond with JSON:
     {
       "command": "command_name",
       "args": ["arg1", "arg2"], 
-      "explanation": "what this does",
-      "working_dir": "${context.workspaceState?.workingDirectory || ''}"
+      "explanation": "what this does"${workingDirSnippet}
     }
   ],
   "response": "Explanation of what you're doing"
@@ -375,9 +466,10 @@ Only generate safe, necessary commands. Be specific with file paths.`;
 
     for (const cmd of commands) {
       try {
-        if (context) {
-          this.emitProgress({ phase: 'log', text: `🛠️ [${this.type}] Execute: ${cmd.command} ${(cmd.args || []).join(' ')}${cmd.working_dir ? ` (cwd: ${cmd.working_dir})` : ''}` }, context);
-        }
+        const effectiveWd = (cmd.working_dir && String(cmd.working_dir).trim())
+          ? String(cmd.working_dir).trim()
+          : (context?.workspaceState?.workingDirectory || undefined);
+        if (context) this.emitProgress({ phase: 'log', text: `🛠️ [${this.type}] Execute: ${cmd.command} ${(cmd.args || []).join(' ')}${effectiveWd ? ` (cwd: ${effectiveWd})` : ''}` }, context);
         const result = await invoke<{
           success: boolean;
           stdout: string;
@@ -386,7 +478,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
         }>("execute_shell_command", {
           command: cmd.command,
           args: cmd.args || [],
-          workingDir: cmd.working_dir,
+          workingDir: effectiveWd,
         });
 
         results.push({
@@ -396,7 +488,7 @@ Only generate safe, necessary commands. Be specific with file paths.`;
           explanation: cmd.explanation,
           command: cmd.command,
           args: cmd.args || [],
-          working_dir: cmd.working_dir,
+          working_dir: effectiveWd,
           exit_code: result.exit_code,
         });
         if (result.success) {
@@ -407,7 +499,15 @@ Only generate safe, necessary commands. Be specific with file paths.`;
           if (context) this.emitProgress({ phase: 'log', text: `❌ [${this.type}] Failed${typeof result.exit_code === 'number' ? ` (exit ${result.exit_code})` : ''}${err ? `\n${err.slice(0, 800)}${err.length > 800 ? '\n… [truncated]' : ''}` : ''}` }, context);
         }
       } catch (error) {
-        const errMsg = error instanceof Error ? error.message : 'Command execution failed';
+        const errMsg = (() => {
+          if (typeof error === 'string') return error;
+          if (error instanceof Error) return error.message;
+          try {
+            const s = JSON.stringify(error);
+            if (s && s !== '{}') return s;
+          } catch {}
+          return String(error ?? 'Command execution failed');
+        })();
         results.push({
           success: false,
           output: "",

@@ -100,6 +100,13 @@
                 </div>
             </div>
         </div>
+        <!-- Right-side Agent Graph Panel -->
+        <div class="w-[360px] shrink-0 border-l border-dark-500 bg-dark-800 flex flex-col">
+            <div class="sticky top-0 h-screen max-h-screen overflow-y-auto p-2">
+                <AgentGraph v-if="agentGraph.nodes.length" :graph="agentGraph" />
+            </div>
+        </div>
+
         <!-- Toast Notification -->
         <div v-if="toast" :class="['toast',
                              toast.type === 'success' ? 'toast-success' : '',
@@ -118,6 +125,13 @@
             @cancel="cancelPathInput"
             @confirm="confirmPathInput"
         />
+        <CommandPermissionDialog
+            v-if="showPermissionDialog && pendingCommand"
+            :command="{ needsCommand: true, command: pendingCommand!.command, args: pendingCommand!.args, explanation: pendingCommand!.explanation || '', confidence: 0.8 }"
+            :userMessage="pendingUserMessage"
+            @approve="approveCommand"
+            @deny="denyCommand"
+        />
     </div>
 </template>
 
@@ -125,8 +139,10 @@
 import { ref, onMounted, nextTick, watch } from "vue";
 // import Sidebar from "../components/Sidebar.vue";
 import ChatMessage from "../components/ChatMessage.vue";
+import AgentGraph from "../components/AgentGraph.vue";
 import NewSessionPrompt from "../components/NewSessionPrompt.vue";
 import PathInputDialog from "../components/PathInputDialog.vue";
+import CommandPermissionDialog from "../components/CommandPermissionDialog.vue";
 // import {
 //     CerebrasService,
 //     type ChatMessage as CerebrasMessage,
@@ -164,6 +180,9 @@ const debugPrompts = ref<Array<{
     type: string;
     content: string;
 }>>([]);
+
+// Agent orchestration graph state
+const agentGraph = ref<{ nodes: Array<{ id: string; type: string; label: string; status?: 'idle' | 'running' | 'success' | 'error' }>; edges: Array<{ from: string; to: string; label?: string }>; note?: string }>({ nodes: [], edges: [], note: '' });
 
 // Simple toast notifications
 const toast = ref<{ message: string; type: "success" | "error" | "info" } | null>(null);
@@ -300,6 +319,20 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                         (current as any).isStreaming = false;
                         if (idx !== -1)
                             messages.value[idx] = { ...(current as any) };
+                    } else if ((evt as any).phase === 'agent_graph') {
+                        const g = (evt as any).graph || { nodes: [], edges: [], note: '' };
+                        try { console.debug('[ChatView] agent_graph', g); } catch (_) {}
+                        agentGraph.value = g;
+                    } else if ((evt as any).phase === 'agent_event') {
+                        const e = (evt as any).event || {};
+                        try { console.debug('[ChatView] agent_event', e); } catch (_) {}
+                        // Update node status based on agent events
+                        const nodeIdx = agentGraph.value.nodes.findIndex(n => n.type === e.agentType || n.id === e.agentId);
+                        if (nodeIdx !== -1) {
+                            if (e.type === 'executing') agentGraph.value.nodes[nodeIdx].status = 'running';
+                            if (e.type === 'completed') agentGraph.value.nodes[nodeIdx].status = e.success ? 'success' : 'error';
+                            if (e.type === 'error') agentGraph.value.nodes[nodeIdx].status = 'error';
+                        }
                     } else if (evt.phase === "error") {
                         logsBuffer +=
                             (logsBuffer ? "\n" : "") +
@@ -312,6 +345,10 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
                         if (idx !== -1)
                             messages.value[idx] = { ...(current as any) };
                     }
+                },
+                {
+                    workingDirectory: workingDirectory.value || undefined,
+                    currentSession: currentSession.value || undefined,
                 },
             );
 
@@ -362,15 +399,25 @@ async function sendMessage(messageData: { text: string; files: File[] }) {
             // Show that commands are being executed
             isLoading.value = true;
             // Apply default working directory if any command is missing it
-            const commandsWithWD = thoughtResult.commands_to_execute.map(
-                (c) => ({
-                    ...c,
-                    working_dir:
-                        c.working_dir || workingDirectory.value || undefined,
-                }),
-            );
-            const commandResults =
-                await ChainOfThoughtProcessor.executeCommands(commandsWithWD);
+            const commandsWithWD = thoughtResult.commands_to_execute.map((c) => ({
+                ...c,
+                working_dir: c.working_dir || workingDirectory.value || undefined,
+            }));
+
+            // Confirm commands that may operate outside the working directory
+            const acceptedCommands: typeof commandsWithWD = [];
+            for (const cmd of commandsWithWD) {
+                if (shouldRequestApproval(cmd, workingDirectory.value || undefined)) {
+                    const approved = await requestCommandApproval(cmd, userMessage.content || "");
+                    if (!approved) {
+                        console.log("Skipping command per user decision:", cmd);
+                        continue;
+                    }
+                }
+                acceptedCommands.push(cmd);
+            }
+
+            const commandResults = await ChainOfThoughtProcessor.executeCommands(acceptedCommands);
             console.log("✅ Command execution results:", commandResults);
 
             // Update the AI message with command results
@@ -785,6 +832,52 @@ async function handleRequestFolder(message: Message) {
     } catch (err) {
         console.error("Folder selection failed:", err);
     }
+}
+
+// --- Command permission gating ---
+const showPermissionDialog = ref(false);
+const pendingCommand = ref<{ command: string; args: string[]; working_dir?: string; explanation?: string } | null>(null);
+const pendingUserMessage = ref<string>("");
+let permissionResolver: ((approved: boolean) => void) | null = null;
+
+function shouldRequestApproval(
+    cmd: { command: string; args: string[]; working_dir?: string },
+    wd?: string,
+): boolean {
+    // Prompt if command is potentially destructive or targets absolute paths outside working dir
+    const risky = new Set(["rm", "mv", "cp", "mkdir", "touch", "sh"]);
+    const hasRisk = risky.has(cmd.command);
+    const hasAbsoluteArg = (cmd.args || []).some(
+        (a) => a.startsWith("/") || a.startsWith("~") || /^[A-Za-z]:\\/.test(a),
+    );
+    const wdMismatch = !!(cmd.working_dir && wd && !cmd.working_dir.startsWith(wd));
+    return hasRisk || hasAbsoluteArg || wdMismatch;
+}
+
+function requestCommandApproval(
+    cmd: { command: string; args: string[]; working_dir?: string; explanation?: string },
+    userMsg: string,
+): Promise<boolean> {
+    pendingCommand.value = cmd;
+    pendingUserMessage.value = userMsg;
+    showPermissionDialog.value = true;
+    return new Promise((resolve) => {
+        permissionResolver = resolve;
+    });
+}
+
+function approveCommand() {
+    showPermissionDialog.value = false;
+    const resolver = permissionResolver;
+    permissionResolver = null;
+    resolver?.(true);
+}
+
+function denyCommand() {
+    showPermissionDialog.value = false;
+    const resolver = permissionResolver;
+    permissionResolver = null;
+    resolver?.(false);
 }
 
 // Manual path input state (fallback when dialog is blocked)

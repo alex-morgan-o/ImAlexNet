@@ -197,6 +197,15 @@ export class OrchestrationAgent extends BaseAgent {
     }
 
     const plan = planResponse.result as ExecutionPlan;
+    // Emit initial plan graph with roles and steps
+    try { this.emitPlanGraph(plan, context, 0, 'Plan created'); } catch (_) {}
+    if (plan.team) {
+      try {
+        const roleList = plan.team.roles.map(r => r.role).join(', ');
+        this.emitProgress({ phase: 'log', text: `👥 Proposed team: Lead=${plan.team.leadRole}, Reviewer=${plan.team.reviewerRole}` }, context);
+        this.emitProgress({ phase: 'log', text: `📌 Roles: ${roleList}` }, context);
+      } catch (_) { /* no-op */ }
+    }
     return this.executePlan(plan, context);
   }
 
@@ -220,6 +229,15 @@ export class OrchestrationAgent extends BaseAgent {
 
     const plan = planResponse.result as ExecutionPlan;
     this.activePlans.set(plan.id, plan);
+    // Emit initial plan graph with roles and steps
+    try { this.emitPlanGraph(plan, context, 0, 'Plan created'); } catch (_) {}
+    if (plan.team) {
+      try {
+        const roleList = plan.team.roles.map(r => r.role).join(', ');
+        this.emitProgress({ phase: 'log', text: `👥 Proposed team: Lead=${plan.team.leadRole}, Reviewer=${plan.team.reviewerRole}` }, context);
+        this.emitProgress({ phase: 'log', text: `📌 Roles: ${roleList}` }, context);
+      } catch (_) { /* no-op */ }
+    }
     
     return this.executePlan(plan, context);
   }
@@ -268,6 +286,8 @@ export class OrchestrationAgent extends BaseAgent {
       const step = plan.steps[i];
       plan.currentStep = i;
       
+      // Update graph for current step
+      try { this.emitPlanGraph(plan, context, i, `Running step ${step.stepNumber}: ${step.description}`); } catch (_) {}
       this.emitProgress({ 
         phase: 'log', 
         text: `🔧 Step ${step.stepNumber}/${plan.steps.length}: ${step.description}` 
@@ -277,6 +297,8 @@ export class OrchestrationAgent extends BaseAgent {
       step.startedAt = Date.now();
 
       try {
+        // Attach current plan to context so agents (e.g., validator) can access prior outputs
+        context.executionPlan = plan;
         const stepResponse = await this.agentRegistry.executeWithAgent(
           step.agentType,
           JSON.stringify(step),
@@ -374,6 +396,66 @@ export class OrchestrationAgent extends BaseAgent {
     }
 
     return executionResult;
+  }
+
+  private emitPlanGraph(plan: ExecutionPlan, context: AgentContext, currentIndex = 0, note?: string): void {
+    const agents = this.agentRegistry.listAgents();
+    const nodes = agents.map(a => ({
+      id: a.id,
+      type: String(a.type),
+      label: String(a.type).replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+      status: 'idle' as const
+    }));
+    const findNodeByType = (t: any) => nodes.find(n => n.type === t);
+    const orch = findNodeByType(AgentType.ORCHESTRATOR);
+
+    // Compute edges for each step
+    const edges: Array<{ from: string; to: string; label?: string; highlight?: boolean; dependency?: boolean }> = [];
+    const steps = plan.steps || [];
+    for (let s = 0; s < steps.length; s++) {
+      const step = steps[s];
+      const fromNode = s === 0 ? orch : findNodeByType(steps[s-1].agentType);
+      const toNode = findNodeByType(step.agentType);
+      if (fromNode && toNode) {
+        edges.push({ 
+          from: fromNode.id, 
+          to: toNode.id, 
+          label: `${step.stepNumber}. ${step.description}`,
+          highlight: s === currentIndex,
+          dependency: false
+        });
+      }
+
+      // Dependency edges (non-sequential)
+      const deps: number[] = (step as any).dependencies || [];
+      if (Array.isArray(deps)) {
+        for (const d of deps) {
+          const depIdx = Number(d) - 1;
+          if (depIdx >= 0 && depIdx < steps.length && depIdx !== s) {
+            const depFrom = depIdx < 0 ? orch : findNodeByType(steps[depIdx].agentType);
+            if (depFrom && toNode) {
+              edges.push({ from: depFrom.id, to: toNode.id, label: undefined, highlight: s === currentIndex, dependency: true });
+            }
+          }
+        }
+      }
+    }
+
+    // Update node statuses and badges for current step
+    const current = steps[currentIndex];
+    if (current) {
+      const curNode = findNodeByType(current.agentType);
+      if (curNode) {
+        curNode.status = 'running';
+        if (current.assigneeRole) {
+          (curNode as any).badge = current.assigneeRole;
+        }
+      }
+    }
+
+    try {
+      context.onProgress?.({ phase: 'agent_graph', graph: { nodes, edges, note } });
+    } catch (_) {}
   }
 
   // Plan management methods

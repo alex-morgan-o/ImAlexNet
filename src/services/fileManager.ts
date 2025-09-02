@@ -38,7 +38,16 @@ export class FileManager {
         workingDir
       })
     } catch (error) {
-      throw new Error(`Shell command failed: ${error}`)
+      const errMsg = (() => {
+        if (typeof error === 'string') return error
+        if (error instanceof Error) return error.message
+        try {
+          const s = JSON.stringify(error)
+          if (s && s !== '{}') return s
+        } catch {}
+        return String(error ?? 'Shell command failed')
+      })()
+      throw new Error(`Shell command failed: ${errMsg}`)
     }
   }
 
