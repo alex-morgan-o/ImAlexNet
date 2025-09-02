@@ -73,3 +73,14 @@ Fallback: If agent system errors, legacy CoT pipeline handles draft → validate
 - Executor: Sees no working directory → returns `needsUserPath` and guidance.
 - UI: Prompts for folder → user selects path → request retried with WD.
 - Executor: Calls LLM to generate `grep`/`ripgrep` commands → Tauri executes → outputs included in `final_response`.
+
+Additional Implementation Details
+- Workspace & Sessions:
+  - Default workspace is `~/AlexNet`; status via `get_workspace_status`, creation via `create_workspace` (both in `src-tauri/src/lib.rs`).
+  - Current path stored in `~/.alexnet/settings.json`. Sessions persist in `~/.alexnet/<session-id>/chat.json` through `create_chat_session`, `save_chat_message`, `load_chat_session`, etc.
+- Tooling Detection:
+  - On startup, backend emits `tools:availability` with `{ claude, codex, gemini }` and persists a full `tools.json` snapshot to `~/.alexnet`.
+  - Frontend uses `src/services/tooling.ts` to listen and refresh via `get_tool_availability` / `get_tools_snapshot`.
+- Delegation to Local CLIs:
+  - Chain‑of‑Thought processor prefers Codex CLI if present, otherwise Claude CLI. It returns `commands_to_execute` shaped for the selected tool and defers execution to the backend for safety.
+  - Backend resolves binaries conservatively (including NVM/homebrew paths) and narrows `PATH` during execution.

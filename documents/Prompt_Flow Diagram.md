@@ -1,6 +1,15 @@
 **Overview**
 - Purpose: Map how a user prompt travels from the Vue UI to the LLM, how results are structured, and how commands run safely on the OS.
-- Key paths: `src/views/ChatView.vue`, `src/services/chainOfThoughtProcessor.ts`, `src/services/agents/*`, `src-tauri/src/lib.rs`, `scripts/cerebras/cerebras-client.cjs`.
+- Key paths: `src/App.vue`, `src/views/ChatView.vue`, `src/services/chainOfThoughtProcessor.ts`, `src/services/agents/*`, `src/services/tooling.ts`, `src-tauri/src/lib.rs`, `scripts/cerebras/cerebras-client.cjs`.
+
+Pre‑Chat Boot Sequence
+```
+App.vue onMounted
+  |
+  +--> invoke('get_workspace_status') → show WorkspacePrompt if missing
+  |
+  +--> tooling.ts: listen('tools:availability') + invoke('get_tool_availability')
+```
 
 **Sequence Diagram (Compact)**
 ```
@@ -112,3 +121,12 @@ ChatView.vue --processUserMessage--> ChainOfThoughtProcessor
 Quick test after changes
 - Run: `npm run tauri dev`
 - Send a prompt and check console for model names in LLM calls or instrument logs if needed.
+
+Command Execution & Safety (Details)
+- Allowed commands (guarded): `cat`, `ls`, `mkdir`, `rm`, `mv`, `cp`, `touch`, `echo`, `head`, `tail`, `wc`, `find`, `grep`, `sed`, `awk`, `sh` (echo‑redirect only), plus AI tools `claude` and `codex`.
+- Validation: Blocks dangerous characters (`;`, `|`, `&`, backticks, `$(`), resolves `~` safely, restricts to safe directories (home/documents/downloads/desktop), and special‑cases `sh -c "echo ... > file"` writes.
+- PATH hardening: Narrowed PATH; executable resolution for `codex`/`claude` (NVM/Homebrew) to improve reliability; removes `SHELL` from env.
+
+Tooling Availability Signals
+- Backend emits `tools:availability` on startup and persists a detailed snapshot to `~/.alexnet/tools.json`.
+- Frontend state lives in `src/services/tooling.ts` and drives delegation preferences (Codex preferred over Claude when both present).
